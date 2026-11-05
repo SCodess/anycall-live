@@ -2,7 +2,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { io } from "socket.io-client";
 
-const SIGNALING_SERVER = "http://localhost:3000";
+const SIGNALING_SERVER = import.meta.env.VITE_SIGNALING_SERVER || "http://localhost:3000";
 const socket = io(SIGNALING_SERVER, {
   autoConnect: true,
   transports: ["websocket", "polling"],

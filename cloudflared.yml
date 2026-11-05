@@ -1,0 +1,8 @@
+tunnel: AUTO_TUNNEL_ID
+credentials-file: C:/Users/Personal/.cloudflared/AUTO_TUNNEL_ID.json
+
+ingress:
+  - hostname: anycall.example.com
+    service: http://localhost:8080
+  - service: http://localhost:3000
+  - service: http_hello_world

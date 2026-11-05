@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -s http://localhost:4041/api/tunnels)",
+      "Bash(chmod +x deploy.sh)",
+      "Bash(git add *)"
+    ]
+  }
+}
