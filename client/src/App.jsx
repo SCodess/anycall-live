@@ -925,7 +925,7 @@ export default function App() {
                   <div className="idle-icon">
                     <Phone size={48} weight="duotone" />
                   </div>
-                  <h1>AnyCall</h1>
+                  <h1>AnyCall Live</h1>
                   <p>Start an audio call or chat with others</p>
                 </div>
               </motion.div>
