@@ -380,7 +380,8 @@ export default function App() {
           echoCancellation: true,
           noiseSuppression: true,
           autoGainControl: true,
-          sampleRate: 48000,
+          sampleRate: { ideal: 48000 },
+          channelCount: 1,
         },
       });
       localStreamRef.current = stream;
@@ -399,7 +400,7 @@ export default function App() {
       });
       appendLog("[mic] local capture ready (caller)");
     } catch (err) {
-      appendLog("[Error] Microphone not available (caller)");
+      appendLog("[Error] Microphone not available (caller): " + err.message);
       console.error(err);
     }
 
@@ -450,7 +451,8 @@ export default function App() {
           echoCancellation: true,
           noiseSuppression: true,
           autoGainControl: true,
-          sampleRate: 48000,
+          sampleRate: { ideal: 48000 },
+          channelCount: 1,
         },
       });
       localStreamRef.current = stream;
@@ -469,7 +471,7 @@ export default function App() {
       });
       appendLog("[mic] local capture ready (callee)");
     } catch (err) {
-      appendLog("[Error] Microphone access denied/unavailable (callee)");
+      appendLog("[Error] Microphone access denied/unavailable (callee): " + err.message);
       throw err;
     }
 
