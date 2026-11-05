@@ -11,7 +11,14 @@
       "Bash(git push *)",
       "Bash(git rm *)",
       "Bash(git clone *)",
-      "Read(//tmp/**)"
+      "Read(//tmp/**)",
+      "Bash(python3 ~/.claude/skills/ui-ux-pro-max/scripts/search.py \"voice call chat entertainment social dark futuristic\" --design-system -p \"AnyCall Live\")",
+      "Bash(python3 ~/.claude/skills/ui-ux-pro-max/scripts/search.py \"dark mode glassmorphism futuristic\" --domain style)",
+      "Bash(python3 ~/.claude/skills/ui-ux-pro-max/scripts/search.py \"voice call app audio chat\" --domain product)",
+      "Bash(python ~/.claude/skills/ui-ux-pro-max/scripts/search.py \"voice call chat entertainment social dark futuristic\" --design-system -p \"AnyCall Live\")",
+      "Bash(python ~/.claude/skills/ui-ux-pro-max/scripts/search.py \"dark mode glassmorphism futuristic\" --domain style)",
+      "Bash(python ~/.claude/skills/ui-ux-pro-max/scripts/search.py \"voice call app audio chat\" --domain product)",
+      "Bash(npm run *)"
     ]
   }
 }

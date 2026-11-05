@@ -1,6 +1,26 @@
 // client/src/App.jsx
 import React, { useEffect, useRef, useState } from "react";
 import { io } from "socket.io-client";
+import { motion, AnimatePresence } from "framer-motion";
+import {
+  Phone,
+  PhoneDisconnect,
+  Microphone,
+  MicrophoneSlash,
+  Users,
+  Clock,
+  ClockCounterClockwise,
+  Chat,
+  WifiHigh,
+  WifiNone,
+  Circle,
+  ArrowRight,
+  Star,
+  SpeakerHigh,
+  SpeakerNone,
+  XCircle,
+  X,
+} from "@phosphor-icons/react";
 
 const SIGNALING_SERVER = import.meta.env.VITE_SIGNALING_SERVER || "http://localhost:3000";
 const socket = io(SIGNALING_SERVER, {
@@ -10,6 +30,30 @@ const socket = io(SIGNALING_SERVER, {
 try {
   window.__SIGNAL_SOCKET = socket;
 } catch (e) {}
+
+// Audio Visualizer Component
+const AudioVisualizer = ({ isSpeaking, isActive }) => {
+  return (
+    <div className="visualizer-container">
+      {[...Array(5)].map((_, i) => (
+        <motion.div
+          key={i}
+          className="visualizer-bar"
+          animate={{
+            height: isSpeaking ? [8, 24 + Math.random() * 16, 8] : 8,
+            opacity: isActive ? 0.8 : 0.4,
+          }}
+          transition={{
+            duration: 0.5,
+            repeat: Infinity,
+            repeatType: "reverse",
+            delay: i * 0.1,
+          }}
+        />
+      ))}
+    </div>
+  );
+};
 
 export default function App() {
   const localAudioRef = useRef();
@@ -36,9 +80,68 @@ export default function App() {
   const [historyVisible, setHistoryVisible] = useState(false);
   const [historyList, setHistoryList] = useState([]);
   const [autoActive, setAutoActive] = useState(false);
+  const [callDuration, setCallDuration] = useState(0);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const audioContextRef = useRef(null);
+  const analyserRef = useRef(null);
+  const animationFrameRef = useRef(null);
 
   // allowIncoming controls whether manual incoming requests are accepted (if false -> auto-reject)
   const [allowIncoming, setAllowIncoming] = useState(true);
+
+  // Audio analysis for visualizer
+  useEffect(() => {
+    if (localStreamRef.current && !audioContextRef.current) {
+      try {
+        const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        const analyser = audioContext.createAnalyser();
+        analyser.fftSize = 256;
+        const source = audioContext.createMediaStreamSource(localStreamRef.current);
+        source.connect(analyser);
+        audioContextRef.current = audioContext;
+        analyserRef.current = analyser;
+
+        const dataArray = new Uint8Array(analyser.frequencyBinCount);
+        const updateVolume = () => {
+          analyser.getByteFrequencyData(dataArray);
+          const average = dataArray.reduce((a, b) => a + b) / dataArray.length;
+          setIsSpeaking(average > 30);
+          animationFrameRef.current = requestAnimationFrame(updateVolume);
+        };
+        updateVolume();
+      } catch (e) {
+        console.warn("Audio analysis failed", e);
+      }
+    }
+
+    return () => {
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current);
+      }
+      if (audioContextRef.current && audioContextRef.current.state !== "closed") {
+        audioContextRef.current.close();
+      }
+    };
+  }, []);
+
+  // Call duration timer
+  useEffect(() => {
+    let interval;
+    if (isInCall) {
+      interval = setInterval(() => {
+        setCallDuration((d) => d + 1);
+      }, 1000);
+    } else {
+      setCallDuration(0);
+    }
+    return () => clearInterval(interval);
+  }, [isInCall]);
+
+  function formatDuration(seconds) {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
+  }
 
   function appendLog(objOrText) {
     const id = Date.now() + "-" + Math.random().toString(36).slice(2, 7);
@@ -684,301 +787,310 @@ export default function App() {
 
   // UI
   return (
-    <div
-      style={{
-        padding: 18,
-        fontFamily: "Inter, system-ui, sans-serif",
-        maxWidth: 1000,
-        margin: "0 auto",
-      }}
-    >
-      <style>{`.panel{background:#fff;border:1px solid #e6eef6;padding:12px;border-radius:10px}.btn{padding:6px 10px;border-radius:10px;border:0;background:#0ea5e9;color:white;cursor:pointer}.btn-ghost{background:transparent;border:1px solid #cbd5e1;color:#0f172a}`}</style>
+    <div className="app-container">
+      <div className="ambient-bg">
+        <div className="orb orb-1"></div>
+        <div className="orb orb-2"></div>
+        <div className="orb orb-3"></div>
+      </div>
 
-      <h2>WebRTC — Presence & Auto-Call</h2>
-      <div>Status: {connected ? "Signaling connected" : "Disconnected"}</div>
-
-      <div style={{ display: "flex", gap: 12, marginTop: 12 }}>
-        <div style={{ flex: 1 }} className="panel">
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center",
-              marginBottom: 8,
-            }}
-          >
-            <div>Online: {onlineList.length}</div>
-            <div style={{ display: "flex", gap: 8 }}>
-              <button className="btn-ghost" onClick={requestHistory}>
-                History
-              </button>
-              {autoActive ? (
-                <button className="btn-ghost" onClick={stopAutoCall}>
-                  Stop Auto
-                </button>
-              ) : (
-                <button className="btn" onClick={startAutoCall}>
-                  Start Auto-Call
-                </button>
-              )}
+      <div className="app-content">
+        {/* Header */}
+        <motion.header
+          className="header"
+          initial={{ opacity: 0, y: -20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.5 }}
+        >
+          <div className="logo">
+            <div className="logo-icon">
+              <Phone size={24} weight="fill" />
             </div>
+            <span className="logo-text">AnyCall</span>
           </div>
-          <div
-            style={{ border: "1px solid #eef2ff", padding: 8, borderRadius: 8 }}
-          >
-            <div style={{ color: "#94a3b8" }}>
-              Auto-call: when ON you will auto-accept incoming invites and be
-              placed in auto queues to call others automatically.
-            </div>
-            <div style={{ marginTop: 8 }}>
-              <label>
-                <input
-                  type="checkbox"
-                  checked={allowIncoming}
-                  onChange={(e) => setAllowIncoming(e.target.checked)}
-                />{" "}
-                Allow Incoming Requests (if OFF, invites are auto-rejected)
-              </label>
-            </div>
-          </div>
-        </div>
-
-        <div style={{ width: 420 }} className="panel">
-          <div style={{ marginBottom: 8 }}>Chat / Logs</div>
-          <div
-            id="log"
-            style={{
-              maxHeight: 260,
-              overflow: "auto",
-              padding: 8,
-              border: "1px solid #e6eef6",
-              borderRadius: 8,
-            }}
-          >
-            {msgLog.map((m) =>
-              m.system ? (
-                <div
-                  key={m.id}
-                  style={{
-                    textAlign: "center",
-                    color: "#64748b",
-                    fontSize: 12,
-                  }}
-                >
-                  {m.text}
-                </div>
-              ) : (
-                <div key={m.id} style={{ marginBottom: 8 }}>
-                  <div style={{ fontSize: 11, color: "#64748b" }}>
-                    {shortId(m.sender)}
-                  </div>
-                  <div
-                    style={{
-                      background: m.me ? "#0ea5e9" : "#f1f5f9",
-                      color: m.me ? "white" : "#0f172a",
-                      padding: 8,
-                      borderRadius: 8,
-                      display: "inline-block",
-                    }}
-                  >
-                    {m.text}
-                  </div>
-                </div>
-              )
+          <div className="status-badge">
+            {connected ? (
+              <>
+                <WifiHigh size={16} color="#10B981" />
+                <span>Connected</span>
+              </>
+            ) : (
+              <>
+                <WifiNone size={16} color="#EF4444" />
+                <span>Disconnected</span>
+              </>
             )}
           </div>
-          <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-            <input
-              style={{ flex: 1, padding: 8 }}
-              value={text}
-              onChange={(e) => setText(e.target.value)}
-              placeholder="Type message..."
-            />
-            <button className="btn" onClick={sendChat}>
-              Send
-            </button>
-          </div>
-        </div>
-      </div>
+        </motion.header>
 
-      <div style={{ marginTop: 12 }} className="panel">
-        <div>Local / Remote Audio</div>
-        <audio
-          ref={localAudioRef}
-          autoPlay
-          muted
-          playsInline
-          style={{ width: "100%", display: "none" }}
-        />
-        <audio
-          ref={remoteAudioRef}
-          autoPlay
-          playsInline
-          style={{ width: "100%" }}
-        />
-        <div style={{ marginTop: 8, display: "flex", gap: 8 }}>
-          <button className="btn-ghost" onClick={toggleMute}>
-            {isMuted ? "Unmute" : "Mute"}
-          </button>
-          <button className="btn-ghost" onClick={hangup}>
-            Hang up
-          </button>
-          <button
-            className="btn-ghost"
-            onClick={() =>
-              alert("My ID: " + (localIdRef.current || "not connected"))
-            }
-          >
-            My ID
-          </button>
-          <button className="btn-ghost" onClick={enableAudioPlayback}>
-            Enable Audio
-          </button>
-        </div>
-        <div style={{ marginTop: 8, color: "#94a3b8", fontSize: 13 }}>
-          Use headphones/earpiece to reduce echo. If audio is delayed, press
-          Enable Audio once.
-        </div>
-      </div>
-
-      {historyVisible && (
-        <div
-          style={{
-            position: "fixed",
-            left: 0,
-            right: 0,
-            top: 0,
-            bottom: 0,
-            background: "rgba(0,0,0,0.35)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-          }}
-        >
-          <div
-            style={{
-              width: 360,
-              background: "#201744",
-              color: "white",
-              borderRadius: 12,
-              padding: 14,
-            }}
-          >
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center",
-                marginBottom: 12,
-              }}
-            >
-              <h3 style={{ margin: 0 }}>Call History</h3>
-              <button
-                className="btn-ghost"
-                onClick={() => setHistoryVisible(false)}
+        {/* Main Content */}
+        <main className="main-content">
+          {/* Call Status Card */}
+          <AnimatePresence mode="wait">
+            {isInCall ? (
+              <motion.div
+                key="call-card"
+                className="call-card"
+                initial={{ scale: 0.9, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                exit={{ scale: 0.9, opacity: 0 }}
+                transition={{ type: "spring", damping: 20 }}
               >
-                ✕
-              </button>
-            </div>
-            <div style={{ maxHeight: "50vh", overflow: "auto" }}>
-              {historyList.length === 0 ? (
-                <div style={{ color: "#9ca3af" }}>No call history yet.</div>
-              ) : (
-                historyList.map((h) => (
-                  <div
-                    key={h.id}
-                    style={{
-                      display: "flex",
-                      justifyContent: "space-between",
-                      alignItems: "center",
-                      padding: 8,
-                      borderBottom: "1px solid #111",
-                    }}
-                  >
-                    <div>
-                      <div style={{ fontWeight: 700 }}>
-                        {shortId(h.id)}{" "}
-                        {h.online ? (
-                          <small style={{ color: "#34d399" }}>(online)</small>
-                        ) : (
-                          <small style={{ color: "#9ca3af" }}>(offline)</small>
-                        )}
-                      </div>
-                      <div style={{ fontSize: 12, color: "#c7d2fe" }}>
-                        {h.country || "Unknown"}
-                      </div>
-                      <div style={{ fontSize: 11, color: "#a5b4fc" }}>
-                        {fmtTime(h.last)}
-                      </div>
+                <div className="call-header">
+                  <div className="call-avatar">
+                    <Circle size={48} weight="fill" />
+                    {isSpeaking && <span className="speaking-indicator"></span>}
+                  </div>
+                  <div className="call-info">
+                    <h2>
+                      {currentPartnerRef.current
+                        ? `Calling ${shortId(currentPartnerRef.current)}`
+                        : "In Call"}
+                    </h2>
+                    <div className="call-meta">
+                      <Clock size={14} />
+                      <span>{formatDuration(callDuration)}</span>
                     </div>
-                    <div>
+                  </div>
+                  <AudioVisualizer isSpeaking={isSpeaking} isActive={isInCall} />
+                </div>
+                <div className="call-controls">
+                  <button
+                    className={`control-btn ${isMuted ? "muted" : ""}`}
+                    onClick={toggleMute}
+                    aria-label={isMuted ? "Unmute microphone" : "Mute microphone"}
+                  >
+                    {isMuted ? <MicrophoneSlash size={24} /> : <Microphone size={24} />}
+                  </button>
+                  <button className="control-btn hangup" onClick={hangup} aria-label="Hang up">
+                    <PhoneDisconnect size={28} weight="fill" />
+                  </button>
+                  <button
+                    className="control-btn"
+                    onClick={enableAudioPlayback}
+                    aria-label="Enable audio"
+                  >
+                    {isMuted ? <SpeakerNone size={24} /> : <SpeakerHigh size={24} />}
+                  </button>
+                </div>
+              </motion.div>
+            ) : incomingCall ? (
+              <motion.div
+                key="incoming-card"
+                className="incoming-card"
+                initial={{ scale: 0.9, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                exit={{ scale: 0.9, opacity: 0 }}
+                transition={{ type: "spring", damping: 20 }}
+              >
+                <div className="incoming-header">
+                  <div className="ringing-animation">
+                    <Circle size={64} weight="fill" />
+                    <motion.span
+                      className="ring"
+                      animate={{ scale: [1, 1.5], opacity: [0.8, 0] }}
+                      transition={{ duration: 1.5, repeat: Infinity }}
+                    />
+                    <motion.span
+                      className="ring ring-2"
+                      animate={{ scale: [1, 1.5], opacity: [0.8, 0] }}
+                      transition={{ duration: 1.5, repeat: Infinity, delay: 0.3 }}
+                    />
+                  </div>
+                  <div className="incoming-info">
+                    <p className="incoming-label">Incoming Call</p>
+                    <h2>{shortId(incomingCall.from)}</h2>
+                  </div>
+                </div>
+                <div className="incoming-controls">
+                  <button className="btn-decline" onClick={rejectIncoming}>
+                    <PhoneDisconnect size={20} />
+                    Decline
+                  </button>
+                  <button className="btn-accept" onClick={acceptIncoming}>
+                    <Phone size={20} />
+                    Accept
+                  </button>
+                </div>
+              </motion.div>
+            ) : (
+              <motion.div
+                key="idle-card"
+                className="idle-card"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+              >
+                <div className="idle-content">
+                  <div className="idle-icon">
+                    <Phone size={48} weight="duotone" />
+                  </div>
+                  <h1>AnyCall</h1>
+                  <p>Start an audio call or chat with others</p>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          {/* Controls Section */}
+          <div className="controls-grid">
+            <motion.div
+              className="card"
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.1 }}
+            >
+              <div className="card-header">
+                <Users size={20} />
+                <span>Online: {onlineList.length}</span>
+              </div>
+              <div className="card-actions">
+                <button className="btn-ghost" onClick={requestHistory}>
+                  <ClockCounterClockwise size={18} />
+                  History
+                </button>
+                {autoActive ? (
+                  <button className="btn btn-danger" onClick={stopAutoCall}>
+                    Stop Auto
+                  </button>
+                ) : (
+                  <button className="btn" onClick={startAutoCall}>
+                    <Star size={18} />
+                    Auto Call
+                  </button>
+                )}
+              </div>
+              <div className="card-footer">
+                <label className="toggle-label">
+                  <input
+                    type="checkbox"
+                    checked={allowIncoming}
+                    onChange={(e) => setAllowIncoming(e.target.checked)}
+                  />
+                  Allow Incoming
+                </label>
+              </div>
+            </motion.div>
+
+            <motion.div
+              className="card chat-card"
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.2 }}
+            >
+              <div className="card-header">
+                <MessageSquare size={20} />
+                <span>Chat</span>
+              </div>
+              <div className="chat-messages" id="log">
+                <AnimatePresence>
+                  {msgLog.slice(-8).map((m) =>
+                    m.system ? (
+                      <motion.div
+                        key={m.id}
+                        className="message system"
+                        initial={{ opacity: 0, y: 10 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0 }}
+                      >
+                        {m.text}
+                      </motion.div>
+                    ) : (
+                      <motion.div
+                        key={m.id}
+                        className={`message ${m.me ? "me" : "other"}`}
+                        initial={{ opacity: 0, x: m.me ? 20 : -20 }}
+                        animate={{ opacity: 1, x: 0 }}
+                        exit={{ opacity: 0 }}
+                      >
+                        <span className="message-sender">{shortId(m.sender)}</span>
+                        <span className="message-text">{m.text}</span>
+                      </motion.div>
+                    )
+                  )}
+                </AnimatePresence>
+              </div>
+              <div className="chat-input">
+                <input
+                  type="text"
+                  value={text}
+                  onChange={(e) => setText(e.target.value)}
+                  placeholder="Type a message..."
+                  onKeyPress={(e) => e.key === "Enter" && sendChat()}
+                />
+                <button className="btn" onClick={sendChat}>
+                  <ArrowRight size={18} />
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        </main>
+      </div>
+
+      {/* History Modal */}
+      <AnimatePresence>
+        {historyVisible && (
+          <motion.div
+            className="modal-overlay"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={() => setHistoryVisible(false)}
+          >
+            <motion.div
+              className="modal-content"
+              initial={{ scale: 0.9, y: 50 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.9, y: 50 }}
+              transition={{ type: "spring", damping: 20 }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="modal-header">
+                <h2>Call History</h2>
+                <button className="btn-icon" onClick={() => setHistoryVisible(false)}>
+                  <X size={20} />
+                </button>
+              </div>
+              <div className="history-list">
+                {historyList.length === 0 ? (
+                  <div className="empty-state">
+                    <ClockCounterClockwise size={48} weight="duotone" />
+                    <p>No call history yet</p>
+                  </div>
+                ) : (
+                  historyList.map((h) => (
+                    <motion.div
+                      key={h.id}
+                      className="history-item"
+                      initial={{ opacity: 0, x: -20 }}
+                      animate={{ opacity: 1, x: 0 }}
+                    >
+                      <div className="history-avatar">
+                        <Circle size={24} weight="fill" />
+                        {h.online && <span className="online-dot"></span>}
+                      </div>
+                      <div className="history-info">
+                        <span className="history-id">{shortId(h.id)}</span>
+                        <span className="history-time">{fmtTime(h.last)}</span>
+                      </div>
                       <button
-                        className="btn"
+                        className="btn btn-sm"
                         onClick={() => inviteCall(h.id)}
                         disabled={!h.online}
                       >
-                        Call
+                        {h.online ? "Call" : "Offline"}
                       </button>
-                    </div>
-                  </div>
-                ))
-              )}
-            </div>
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "flex-end",
-                marginTop: 12,
-              }}
-            >
-              <button
-                className="btn-ghost"
-                onClick={() => setHistoryVisible(false)}
-              >
-                Close
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+                    </motion.div>
+                  ))
+                )}
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
-      {incomingCall && allowIncoming && (
-        <div
-          style={{
-            position: "fixed",
-            left: 0,
-            right: 0,
-            top: 0,
-            bottom: 0,
-            background: "rgba(0,0,0,0.35)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-          }}
-        >
-          <div
-            style={{
-              background: "#fff",
-              padding: 20,
-              borderRadius: 12,
-              width: 380,
-            }}
-          >
-            <h3>Incoming call</h3>
-            <p>From: {shortId(incomingCall.from)}</p>
-            <div
-              style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}
-            >
-              <button className="btn-ghost" onClick={rejectIncoming}>
-                Reject
-              </button>
-              <button className="btn" onClick={acceptIncoming}>
-                Accept
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <audio ref={localAudioRef} autoPlay muted playsInline style={{ display: "none" }} />
+      <audio ref={remoteAudioRef} autoPlay playsInline style={{ display: "none" }} />
     </div>
   );
 }
