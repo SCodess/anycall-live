@@ -1,0 +1,12 @@
+[build]
+builder = "NIXPACKS"
+buildCommand = "cd server && npm install"
+
+[deploy]
+startCommand = "cd server && node index.js"
+healthcheckPath = "/"
+healthcheckTimeout = 100
+
+[env]
+PORT = "3000"
+NODE_ENV = "production"
