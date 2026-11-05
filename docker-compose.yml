@@ -1,0 +1,48 @@
+version: "3.8"
+services:
+  server:
+    build: ./server
+    container_name: anycall_server
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+    networks:
+      - anycall_net
+
+  client:
+    build: ./client
+    container_name: anycall_client
+    restart: unless-stopped
+    networks:
+      - anycall_net
+
+  nginx:
+    image: nginx:stable-alpine
+    container_name: anycall_nginx
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+    ports:
+      - "80:80"
+    depends_on:
+      - client
+      - server
+    networks:
+      - anycall_net
+
+  coturn:
+    image: instrumentisto/coturn
+    container_name: anycall_coturn
+    restart: unless-stopped
+    environment:
+      - REALM=yourdomain.com
+    ports:
+      - "3478:3478"
+      - "3478:3478/udp"
+    networks:
+      - anycall_net
+
+networks:
+  anycall_net:
+    driver: bridge

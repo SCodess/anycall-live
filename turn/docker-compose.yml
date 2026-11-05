@@ -1,0 +1,14 @@
+version: '3.8'
+services:
+  coturn:
+    image: instrumentisto/coturn
+    restart: always
+    ports:
+      - "3478:3478"
+      - "5349:5349"
+    command: >
+      turnserver -n --verbose
+      --realm=mydomain.com
+      --lt-cred-mech
+      --user=user:password
+      --no-cli
