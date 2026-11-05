@@ -18,7 +18,12 @@
       "Bash(python ~/.claude/skills/ui-ux-pro-max/scripts/search.py \"voice call chat entertainment social dark futuristic\" --design-system -p \"AnyCall Live\")",
       "Bash(python ~/.claude/skills/ui-ux-pro-max/scripts/search.py \"dark mode glassmorphism futuristic\" --domain style)",
       "Bash(python ~/.claude/skills/ui-ux-pro-max/scripts/search.py \"voice call app audio chat\" --domain product)",
-      "Bash(npm run *)"
+      "Bash(npm run *)",
+      "Bash(curl -s \"https://api.github.com/repos/SCodess/anycall-live/commits/main\")",
+      "Bash(curl -s https://api.github.com/repos/SCodess/anycall-live/commits/main)",
+      "Bash(curl -s https://anycall-live.vercel.app/)",
+      "Bash(curl -s https://anycall-live.vercel.app/assets/index-C1WvKYUa.js)",
+      "Bash(curl -s https://anycall-live.vercel.app/assets/index-DYSHqS8s.css)"
     ]
   }
 }
