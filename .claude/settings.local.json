@@ -25,7 +25,14 @@
       "Bash(curl -s https://anycall-live.vercel.app/assets/index-C1WvKYUa.js)",
       "Bash(curl -s https://anycall-live.vercel.app/assets/index-DYSHqS8s.css)",
       "Bash(curl -sI https://anycall-live.vercel.app/assets/index-C1WvKYUa.js)",
-      "Bash(curl -sI https://anycall-live.vercel.app/assets/index-DYSHqS8s.css)"
+      "Bash(curl -sI https://anycall-live.vercel.app/assets/index-DYSHqS8s.css)",
+      "Bash(curl -s \"https://anycall-live.vercel.app/?t=$\\(date +%s\\)\")",
+      "Bash(curl -sI \"https://anycall-live.vercel.app/assets/index-C1WvKYUa.js?t=$\\(date +%s\\)\")",
+      "Bash(curl -s \"https://anycall-live.vercel.app/assets/index-C1WvKYUa.js\")",
+      "Bash(curl -s \"https://anycall-live.vercel.app/assets/index-DYSHqS8s.css\")",
+      "Bash(curl -sI \"https://anycall-live.vercel.app/assets/index-C1WvKYUa.js\")",
+      "Bash(curl -s \"https://anycall-live.vercel.app/\")",
+      "Bash(curl -s \"https://anycall-live.vercel.app/assets/\")"
     ]
   }
 }
