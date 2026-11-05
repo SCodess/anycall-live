@@ -3,7 +3,13 @@
     "allow": [
       "Bash(curl -s http://localhost:4041/api/tunnels)",
       "Bash(chmod +x deploy.sh)",
-      "Bash(git add *)"
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(gh auth *)",
+      "Bash(npm install *)",
+      "Bash(git remote *)",
+      "Bash(git push *)",
+      "Bash(git rm *)"
     ]
   }
 }
