@@ -3,7 +3,7 @@ builder = "NIXPACKS"
 buildCommand = "npm install"
 
 [deploy]
-startCommand = "npm start"
+startCommand = "node index.js"
 healthcheckPath = "/"
 healthcheckTimeout = 100
 
