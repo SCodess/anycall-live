@@ -1,0 +1,18 @@
+{
+  "name": "anycall-live",
+  "version": "1.0.0",
+  "description": "AnyCall real-time voice + chat application",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "install-server": "cd server && npm install",
+    "install-client": "cd client && npm install",
+    "build-client": "cd client && npm run build"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "geoip-lite": "^1.4.10",
+    "socket.io": "^4.8.1",
+    "cors": "^2.8.5"
+  }
+}
