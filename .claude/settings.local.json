@@ -35,7 +35,8 @@
       "Bash(curl -s \"https://anycall-live.vercel.app/assets/\")",
       "Bash(curl -sI \"https://anycall-live.vercel.app/assets/index-3LkZzoyf.js\")",
       "Bash(echo \"// Deployed at $\\(date\\)\")",
-      "Bash(npx vercel *)"
+      "Bash(npx vercel *)",
+      "Bash(curl -s \"https://anycall-live.vercel.app/\" -H \"Cache-Control: no-cache\")"
     ]
   }
 }
