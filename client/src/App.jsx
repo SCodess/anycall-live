@@ -979,7 +979,7 @@ export default function App() {
               transition={{ delay: 0.2 }}
             >
               <div className="card-header">
-                <MessageSquare size={20} />
+                <Chat size={20} />
                 <span>Chat</span>
               </div>
               <div className="chat-messages" id="log">
