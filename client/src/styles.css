@@ -22,6 +22,7 @@
   --radius-md: 12px;
   --radius-lg: 16px;
   --radius-xl: 24px;
+  --radius-full: 9999px;
 }
 
 * {
@@ -35,6 +36,7 @@ body {
   background: var(--bg-primary);
   color: var(--text-primary);
   min-height: 100vh;
+  min-height: 100dvh;
   overflow-x: hidden;
   line-height: 1.5;
 }
@@ -99,16 +101,20 @@ body {
   position: relative;
   z-index: 1;
   min-height: 100vh;
+  min-height: 100dvh;
   display: flex;
   flex-direction: column;
 }
 
 .app-content {
   flex: 1;
-  max-width: 900px;
-  margin: 0 auto;
   width: 100%;
+  max-width: 1180px;
+  margin: 0 auto;
   padding: 20px;
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
 }
 
 /* Header */
@@ -160,9 +166,29 @@ body {
 
 /* Main Content */
 .main-content {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 400px;
+  grid-template-rows: minmax(0, 1fr);
+  gap: 20px;
+}
+
+.call-column {
   display: flex;
   flex-direction: column;
   gap: 20px;
+  min-width: 0;
+  min-height: 0;
+}
+
+.call-column > .call-card,
+.call-column > .idle-card,
+.call-column > .incoming-card {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
 }
 
 /* Card Base */
@@ -470,12 +496,6 @@ body {
   gap: 20px;
 }
 
-@media (min-width: 768px) {
-  .controls-grid {
-    grid-template-columns: 1fr 1fr;
-  }
-}
-
 /* Buttons */
 .btn {
   display: inline-flex;
@@ -555,25 +575,29 @@ body {
 .chat-card {
   display: flex;
   flex-direction: column;
-  max-height: 400px;
+  height: 100%;
+  min-height: 480px;
+  max-height: none;
 }
 
 .chat-messages {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
-  padding: 16px 20px;
+  padding: 18px 20px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  max-height: 240px;
+  gap: 10px;
 }
 
 .message {
-  max-width: 80%;
+  max-width: 82%;
   padding: 10px 14px;
   border-radius: var(--radius-md);
   font-size: 14px;
-  line-height: 1.4;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .message.system {
@@ -635,6 +659,19 @@ body {
 
 .chat-input input::placeholder {
   color: var(--text-muted);
+}
+
+.chat-input input:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.remote-audio {
+  position: absolute;
+  width: 0;
+  height: 0;
+  opacity: 0;
+  pointer-events: none;
 }
 
 /* Toggle Label */
@@ -788,11 +825,34 @@ body {
 /* Responsive */
 @media (min-width: 768px) {
   .app-content {
-    padding: 32px;
+    padding: 24px 32px;
+  }
+}
+
+@media (max-width: 900px) {
+  .main-content {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(340px, 55vh);
+  }
+
+  .call-column > .call-card,
+  .call-column > .idle-card,
+  .call-column > .incoming-card {
+    flex: none;
+  }
+
+  .chat-card {
+    height: auto;
+    min-height: 340px;
+    max-height: 55vh;
   }
 }
 
 @media (max-width: 480px) {
+  .app-content {
+    padding: 14px;
+  }
+
   .call-header {
     flex-direction: column;
     text-align: center;
@@ -809,6 +869,14 @@ body {
   .btn-decline, .btn-accept {
     width: 100%;
     justify-content: center;
+  }
+
+  .chat-messages {
+    padding: 14px;
+  }
+
+  .chat-input {
+    padding: 12px 14px;
   }
 }
 

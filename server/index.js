@@ -8,6 +8,10 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+app.get("/", (req, res) => {
+  res.json({ ok: true, service: "anycall-signaling" });
+});
+
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
@@ -190,31 +194,45 @@ io.on("connection", (socket) => {
     io.to(to).emit("call-invite", { from: socket.id });
   });
 
-  socket.on("call-accept", ({ to, from }) => {
-    if (to) io.to(to).emit("call-accept", { from: socket.id });
+  socket.on("call-accept", ({ to }) => {
+    if (!to || !users.has(to)) return;
+    // Remember the 1-to-1 pair so chat can only flow between these two.
+    matches.set(socket.id, to);
+    matches.set(to, socket.id);
+    io.to(to).emit("call-accept", { from: socket.id });
   });
   socket.on("call-reject", ({ to, from }) => {
     if (to) io.to(to).emit("call-reject", { from: socket.id });
   });
-  socket.on("call-hangup", ({ to, from }) => {
-    if (to) io.to(to).emit("call-hangup", { from: socket.id });
-    const partner = matches.get(socket.id);
+  socket.on("call-hangup", ({ to }) => {
+    const partner = matches.get(socket.id) || to;
+    const targets = new Set([to, partner].filter(Boolean));
+    targets.forEach((target) => {
+      io.to(target).emit("call-hangup", { from: socket.id });
+    });
     if (partner) {
       matches.delete(socket.id);
       matches.delete(partner);
-      io.to(partner).emit("call-hangup", { from: socket.id });
       onCallEndedAndTryRematch(socket.id, partner);
     }
-  })
+  });
 
-  // Chat forwarding (fallback when datachannel isn't available)
-  socket.on("chat", ({ to, message }) => {
-    if (!to || !message) return;
+  // Chat forwarding (fallback when the data channel isn't available).
+  // Only a message between the currently matched pair is forwarded.
+  socket.on("chat", ({ to, message, text }) => {
+    const body = typeof message === "string" ? message : text;
+    if (!to || typeof body !== "string" || !body.trim()) return;
+
+    const partner = matches.get(socket.id);
+    if (partner && partner !== to) return;
+
     try {
-      // trim message when logging to avoid huge outputs
-      const preview = (typeof message === "string" && message.length > 120) ? message.slice(0, 120) + "..." : message;
-      console.log(`[chat] ${socket.id} -> ${to}: ${preview}`);
-      io.to(to).emit("chat", { from: socket.id, message });
+      const outgoing = body.slice(0, 2000);
+      io.to(to).emit("chat", {
+        from: socket.id,
+        sender: socket.id,
+        text: outgoing,
+      });
     } catch (e) {
       console.error("[chat] forward failed", e);
     }
