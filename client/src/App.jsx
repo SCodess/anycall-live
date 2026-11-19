@@ -42,27 +42,55 @@ try {
  * - Lowest possible receiver jitter buffer for delay.
  * - Public STUN + TURN fallback so the media path is direct whenever possible.
  */
-const ICE_SERVERS = [
-  {
-    urls: [
-      "stun:stun.l.google.com:19302",
-      "stun:stun1.l.google.com:19302",
-      "stun:stun2.l.google.com:19302",
-      "stun:stun3.l.google.com:19302",
-      "stun:stun4.l.google.com:19302",
-      "stun:stun.cloudflare.com:3478",
-    ],
-  },
-  {
-    urls: [
-      "turn:openrelay.metered.ca:80",
-      "turn:openrelay.metered.ca:443",
-      "turn:openrelay.metered.ca:443?transport=tcp",
-    ],
-    username: "openrelayproject",
-    credential: "openrelayproject",
-  },
+const STUN_SERVERS = [
+  "stun:stun.l.google.com:19302",
+  "stun:stun1.l.google.com:19302",
+  "stun:stun2.l.google.com:19302",
+  "stun:stun3.l.google.com:19302",
+  "stun:stun4.l.google.com:19302",
+  "stun:stun.cloudflare.com:3478",
 ];
+
+// A production TURN server can be supplied at build time:
+//   VITE_TURN_URL=turn:turn.example.com:3478
+//   VITE_TURN_USERNAME=...
+//   VITE_TURN_CREDENTIAL=...
+// Without it, the public Open Relay fallback is used (best effort only).
+const CUSTOM_TURN_URL = (import.meta.env.VITE_TURN_URL || "").trim();
+const CUSTOM_TURN_USERNAME = import.meta.env.VITE_TURN_USERNAME || "";
+const CUSTOM_TURN_CREDENTIAL = import.meta.env.VITE_TURN_CREDENTIAL || "";
+
+const PUBLIC_TURN = {
+  urls: [
+    "turn:openrelay.metered.ca:80",
+    "turn:openrelay.metered.ca:443",
+    "turn:openrelay.metered.ca:443?transport=tcp",
+  ],
+  username: "openrelayproject",
+  credential: "openrelayproject",
+};
+
+const ICE_SERVERS = [
+  { urls: STUN_SERVERS },
+  CUSTOM_TURN_URL
+    ? {
+        urls: CUSTOM_TURN_URL.split(",")
+          .map((url) => url.trim())
+          .filter(Boolean),
+        username: CUSTOM_TURN_USERNAME,
+        credential: CUSTOM_TURN_CREDENTIAL,
+      }
+    : PUBLIC_TURN,
+];
+
+try {
+  window.__ANY_CALL_ICE = ICE_SERVERS;
+} catch (e) {}
+
+// A call may never stay in "connecting" forever.
+const CONNECT_TIMEOUT_MS = 20000;
+const DISCONNECT_GRACE_MS = 6000;
+const MAX_BUFFERED_CANDIDATES = 100;
 
 const MIC_CONSTRAINTS = {
   audio: {
@@ -221,15 +249,18 @@ export default function App() {
   const localStreamRef = useRef(null);
   const lastRemoteStreamIdRef = useRef(null);
   const disconnectTimerRef = useRef(null);
+  const connectTimerRef = useRef(null);
+  const iceRestartCountRef = useRef(0);
 
-  const pendingSDPRef = useRef([]);
   const pendingCandidatesRef = useRef([]);
 
   const localIdRef = useRef(null);
   const currentPartnerRef = useRef(null);
+  const callIdRef = useRef(null);
   const autoActiveRef = useRef(false);
   const allowIncomingRef = useRef(true);
   const preparingRef = useRef(null);
+  const hadConnectedRef = useRef(false);
 
   const [connected, setConnected] = useState(false);
   const [messages, setMessages] = useState([]);
@@ -245,6 +276,7 @@ export default function App() {
   const [callDuration, setCallDuration] = useState(0);
   const [partnerId, setPartnerId] = useState(null);
   const [allowIncoming, setAllowIncoming] = useState(true);
+  const [callNotice, setCallNotice] = useState("");
 
   useEffect(() => {
     autoActiveRef.current = autoActive;
@@ -310,6 +342,74 @@ export default function App() {
     setPartnerId(id || null);
   }
 
+  // A call id is the identity of the signaling session. Without it a late
+  // SDP/ICE packet from an old peer could be applied to a new call.
+  function setCall(callId, partner) {
+    callIdRef.current = callId || null;
+    setPartner(partner);
+  }
+
+  function clearCallTimers() {
+    if (connectTimerRef.current) {
+      clearTimeout(connectTimerRef.current);
+      connectTimerRef.current = null;
+    }
+    if (disconnectTimerRef.current) {
+      clearTimeout(disconnectTimerRef.current);
+      disconnectTimerRef.current = null;
+    }
+  }
+
+  function startConnectTimer(pc) {
+    if (connectTimerRef.current) clearTimeout(connectTimerRef.current);
+    connectTimerRef.current = setTimeout(() => {
+      connectTimerRef.current = null;
+      if (pcRef.current === pc && pc.connectionState !== "connected") {
+        debug("connection timeout");
+        failCall("connect-timeout");
+      }
+    }, CONNECT_TIMEOUT_MS);
+  }
+
+  // Locally give up on a call and tell the other side (and the server) so it
+  // can release the reservation and requeue an Auto Call user.
+  function failCall(reason) {
+    const partner = currentPartnerRef.current;
+    const callId = callIdRef.current;
+    if (partner || callId) {
+      socket.emit("call-hangup", {
+        to: partner || null,
+        callId: callId || null,
+        reason: reason || "failed",
+      });
+    }
+    if (reason === "connect-timeout") {
+      setCallNotice("Could not connect. Please try again.");
+    } else if (reason === "connection-lost") {
+      setCallNotice("Connection lost. Please try again.");
+    }
+    cleanupCall();
+  }
+
+  function handleMediaFailure(error) {
+    const denied =
+      error &&
+      (error.name === "NotAllowedError" ||
+        error.name === "PermissionDeniedError" ||
+        error.name === "SecurityError");
+    setCallNotice(
+      denied
+        ? "Microphone permission is required to make a call."
+        : "Could not start the microphone."
+    );
+    // Do not loop Auto Call through a microphone that cannot open.
+    if (autoActiveRef.current) {
+      autoActiveRef.current = false;
+      setAutoActive(false);
+      socket.emit("auto-call-stop", {});
+    }
+  }
+
   // Only real chat messages ever go into the chat box. There are no system
   // log lines, no sender labels and no other text in that panel.
   function addMessage({ text: body, me }) {
@@ -323,22 +423,22 @@ export default function App() {
     setMessages((prev) => [...prev, message]);
   }
 
-  function flushPendingCandidatesFor(peerId) {
+  // Candidates are only applied after a remote description exists, and only
+  // for the peer + call that is currently active. Anything else is stale.
+  async function flushPendingCandidatesFor(pc, peerId, callId) {
+    if (!pc || !pc.remoteDescription || pc.signalingState === "closed") return;
     const remaining = [];
     for (const item of pendingCandidatesRef.current) {
-      if (!item.from || item.from === peerId) {
-        try {
-          if (pcRef.current && pcRef.current.signalingState !== "closed") {
-            pcRef.current.addIceCandidate(
-              new RTCIceCandidate(item.candidate)
-            );
-          } else {
-            remaining.push(item);
-          }
-        } catch (e) {
-          remaining.push(item);
-        }
-      } else {
+      if (item.from !== peerId) {
+        remaining.push(item);
+        continue;
+      }
+      if (item.callId && callId && item.callId !== callId) {
+        continue;
+      }
+      try {
+        await pc.addIceCandidate(new RTCIceCandidate(item.candidate));
+      } catch (e) {
         remaining.push(item);
       }
     }
@@ -371,6 +471,22 @@ export default function App() {
           payload.type === "chat" &&
           typeof payload.text === "string"
         ) {
+          // A data channel from a previous call may still deliver a frame
+          // after a rematch; never mix it into the new conversation.
+          if (
+            payload.callId &&
+            callIdRef.current &&
+            payload.callId !== callIdRef.current
+          ) {
+            return;
+          }
+          if (
+            payload.sender &&
+            currentPartnerRef.current &&
+            payload.sender !== currentPartnerRef.current
+          ) {
+            return;
+          }
           addMessage({ text: payload.text, me: false });
         }
       } catch (e) {
@@ -422,12 +538,9 @@ export default function App() {
     setChatReady(false);
     setPartner(null);
 
-    if (disconnectTimerRef.current) {
-      clearTimeout(disconnectTimerRef.current);
-      disconnectTimerRef.current = null;
-    }
-
-    pendingSDPRef.current = [];
+    clearCallTimers();
+    callIdRef.current = null;
+    iceRestartCountRef.current = 0;
     pendingCandidatesRef.current = [];
 
     if (remoteAudioRef.current) {
@@ -441,9 +554,45 @@ export default function App() {
     debug("call cleaned up");
   }
 
+  async function attemptIceRestart(pc, reason) {
+    if (!pc || pcRef.current !== pc) return false;
+    if (iceRestartCountRef.current >= 1) return false;
+    const partner = currentPartnerRef.current;
+    const callId = callIdRef.current;
+    if (!partner) return false;
+
+    iceRestartCountRef.current += 1;
+    debug("ICE restart", reason);
+    try {
+      pc.restartIce();
+      const offer = await pc.createOffer({
+        iceRestart: true,
+        offerToReceiveAudio: true,
+        offerToReceiveVideo: false,
+      });
+      if (pcRef.current !== pc) return false;
+      await pc.setLocalDescription({
+        type: offer.type,
+        sdp: tuneOpusSdp(offer.sdp),
+      });
+      socket.emit("signal", {
+        to: partner,
+        callId,
+        data: { sdp: plainSdp(pc.localDescription) },
+      });
+      startConnectTimer(pc);
+      return true;
+    } catch (e) {
+      debug("ICE restart failed", e);
+      return false;
+    }
+  }
+
   async function createPeerWithMic(isCaller) {
     cleanupPeer();
     setChatReady(false);
+    setCallNotice("");
+    iceRestartCountRef.current = 0;
     // Starting a new call clears the previous conversation so a new random
     // partner can never see the old 1-to-1 chat.
     setMessages([]);
@@ -459,6 +608,7 @@ export default function App() {
     pc.ondatachannel = (event) => setupDataChannel(event.channel);
 
     pc.ontrack = async (event) => {
+      if (pcRef.current !== pc) return;
       const stream =
         event.streams && event.streams[0]
           ? event.streams[0]
@@ -470,15 +620,18 @@ export default function App() {
       if (remoteAudioRef.current) {
         remoteAudioRef.current.srcObject = stream;
         remoteAudioRef.current.volume = 1;
-        await playAudioElement(remoteAudioRef.current);
+        const played = await playAudioElement(remoteAudioRef.current);
+        if (!played) setCallNotice("Tap anywhere to hear the call.");
       }
       tuneAudioReceivers(pc);
     };
 
     pc.onicecandidate = (event) => {
+      if (pcRef.current !== pc) return;
       if (event.candidate && currentPartnerRef.current) {
         socket.emit("signal", {
           to: currentPartnerRef.current,
+          callId: callIdRef.current,
           data: { candidate: event.candidate },
         });
       }
@@ -490,24 +643,42 @@ export default function App() {
       debug("connection state", state);
 
       if (state === "connected") {
-        if (disconnectTimerRef.current) {
-          clearTimeout(disconnectTimerRef.current);
-          disconnectTimerRef.current = null;
-        }
+        // Only real ICE connectivity reaches this branch. The UI / server
+        // never call a call "connected" earlier than this.
+        clearCallTimers();
+        iceRestartCountRef.current = 0;
         setIsInCall(true);
         setChatReady(true);
+        setCallNotice("");
+        socket.emit("call-connected", { callId: callIdRef.current });
         tuneAudioReceivers(pc);
         applyAudioSenderParams(pc);
+        playAudioElement(remoteAudioRef.current).then((played) => {
+          if (!played) setCallNotice("Tap anywhere to hear the call.");
+        });
       } else if (state === "disconnected") {
-        // Give ICE a few seconds to recover before dropping the call.
         if (disconnectTimerRef.current) clearTimeout(disconnectTimerRef.current);
-        disconnectTimerRef.current = setTimeout(() => {
-          if (pcRef.current === pc && pc.connectionState === "disconnected") {
-            cleanupCall();
+        disconnectTimerRef.current = setTimeout(async () => {
+          disconnectTimerRef.current = null;
+          if (pcRef.current !== pc || pc.connectionState !== "disconnected") {
+            return;
           }
-        }, 10000);
+          const restarted = await attemptIceRestart(pc, "disconnected");
+          if (!restarted) {
+            failCall("connection-lost");
+            return;
+          }
+          disconnectTimerRef.current = setTimeout(() => {
+            disconnectTimerRef.current = null;
+            if (pcRef.current === pc && pc.connectionState !== "connected") {
+              failCall("connection-lost");
+            }
+          }, DISCONNECT_GRACE_MS + 6000);
+        }, DISCONNECT_GRACE_MS);
       } else if (state === "failed") {
-        cleanupCall();
+        attemptIceRestart(pc, "failed").then((restarted) => {
+          if (!restarted) failCall("connection-lost");
+        });
       }
     };
 
@@ -567,18 +738,21 @@ export default function App() {
     return pc;
   }
 
-  async function startOfferFlow(targetId) {
+  async function startOfferFlow(targetId, callId) {
     if (!targetId) return;
-    setPartner(targetId);
+    setCall(callId || callIdRef.current, targetId);
 
+    const activeCallId = callIdRef.current;
     let pc;
     try {
       pc = await createPeerWithMic(true);
     } catch (err) {
       if (!err || err.message !== "Call cancelled") {
+        handleMediaFailure(err);
         socket.emit("call-reject", {
           to: targetId,
-          from: localIdRef.current,
+          callId: activeCallId,
+          reason: "media-error",
         });
         cleanupCall();
       }
@@ -598,22 +772,55 @@ export default function App() {
 
     socket.emit("signal", {
       to: targetId,
+      callId: activeCallId,
       data: { sdp: plainSdp(pc.localDescription) },
     });
 
+    startConnectTimer(pc);
     tuneAudioReceivers(pc);
     applyAudioSenderParams(pc);
   }
 
-  async function handleSignal({ id, data }) {
-    if (!data) return;
+  async function handleSignal({ id, callId, data }) {
+    if (!data || !id) return;
+
+    // Signaling is only accepted from the peer of the current call. This is
+    // what stops late ICE/SDP from a previous partner corrupting a new one.
+    if (id !== currentPartnerRef.current) {
+      debug("dropped signal from stale peer", id);
+      return;
+    }
+    if (callId && callIdRef.current && callId !== callIdRef.current) {
+      debug("dropped signal for stale call", callId);
+      return;
+    }
+    if (!callIdRef.current && callId) callIdRef.current = callId;
+
+    const activeCallId = callIdRef.current;
+
     try {
       if (data.sdp) {
         const description = new RTCSessionDescription(data.sdp);
 
         if (description.type === "offer") {
-          // If the callee is still preparing (mic permission prompt), wait for
-          // that same peer instead of creating a second one.
+          // Two offers can cross during an ICE restart. The peer with the
+          // higher socket id is "polite": it rolls back and answers.
+          if (
+            pcRef.current &&
+            pcRef.current.signalingState === "have-local-offer"
+          ) {
+            const polite = String(localIdRef.current) > String(id);
+            if (!polite) {
+              debug("SDP glare: keeping local offer");
+              return;
+            }
+            try {
+              await pcRef.current.setLocalDescription({ type: "rollback" });
+            } catch (e) {
+              debug("rollback failed", e);
+            }
+          }
+
           if (!pcRef.current && preparingRef.current) {
             try {
               await preparingRef.current;
@@ -624,21 +831,24 @@ export default function App() {
             try {
               await createPeerWithMic(false);
             } catch (e) {
+              handleMediaFailure(e);
               socket.emit("call-reject", {
                 to: id,
-                from: localIdRef.current,
+                callId: activeCallId,
+                reason: "media-error",
               });
+              cleanupCall();
               return;
             }
           }
 
           const pc = pcRef.current;
-          if (!pc || pc.signalingState !== "stable") {
-            pendingSDPRef.current.push({ sdp: data.sdp, from: id });
+          if (!pc || pc.signalingState === "closed") return;
+          if (pc.signalingState !== "stable") {
+            debug("ignored offer in state", pc.signalingState);
             return;
           }
 
-          setPartner(id);
           await pc.setRemoteDescription(description);
 
           const answer = await pc.createAnswer();
@@ -649,56 +859,59 @@ export default function App() {
 
           socket.emit("signal", {
             to: id,
+            callId: activeCallId,
             data: { sdp: plainSdp(pc.localDescription) },
           });
 
+          startConnectTimer(pc);
           tuneAudioReceivers(pc);
           applyAudioSenderParams(pc);
-          flushPendingCandidatesFor(id);
+          await flushPendingCandidatesFor(pc, id, activeCallId);
           return;
         }
 
         if (description.type === "answer") {
-          if (!pcRef.current) {
-            pendingSDPRef.current.push({ sdp: data.sdp, from: id });
+          const pc = pcRef.current;
+          if (!pc || pc.signalingState !== "have-local-offer") {
+            debug("ignored answer in state", pc && pc.signalingState);
             return;
           }
-
-          const pc = pcRef.current;
-          const signalingState = pc.signalingState;
-          if (
-            signalingState === "have-local-offer" ||
-            signalingState === "have-remote-offer"
-          ) {
-            setPartner(id);
-            await pc.setRemoteDescription(description);
-            tuneAudioReceivers(pc);
-            applyAudioSenderParams(pc);
-            flushPendingCandidatesFor(id);
-          } else {
-            pendingSDPRef.current.push({ sdp: data.sdp, from: id });
-          }
+          await pc.setRemoteDescription(description);
+          tuneAudioReceivers(pc);
+          applyAudioSenderParams(pc);
+          await flushPendingCandidatesFor(pc, id, activeCallId);
           return;
         }
       }
 
       if (data.candidate) {
-        if (!pcRef.current || pcRef.current.signalingState === "closed") {
-          pendingCandidatesRef.current.push({
-            candidate: data.candidate,
-            from: id,
-          });
+        const pc = pcRef.current;
+        const ready =
+          pc &&
+          pc.signalingState !== "closed" &&
+          !!pc.remoteDescription;
+
+        if (!ready) {
+          if (pendingCandidatesRef.current.length < MAX_BUFFERED_CANDIDATES) {
+            pendingCandidatesRef.current.push({
+              candidate: data.candidate,
+              from: id,
+              callId: activeCallId,
+            });
+          }
           return;
         }
+
         try {
-          await pcRef.current.addIceCandidate(
-            new RTCIceCandidate(data.candidate)
-          );
+          await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
         } catch (e) {
-          pendingCandidatesRef.current.push({
-            candidate: data.candidate,
-            from: id,
-          });
+          if (pendingCandidatesRef.current.length < MAX_BUFFERED_CANDIDATES) {
+            pendingCandidatesRef.current.push({
+              candidate: data.candidate,
+              from: id,
+              callId: activeCallId,
+            });
+          }
         }
       }
     } catch (e) {
@@ -708,14 +921,28 @@ export default function App() {
 
   useEffect(() => {
     function onConnect() {
+      const isReconnect = hadConnectedRef.current;
+      hadConnectedRef.current = true;
       localIdRef.current = socket.id;
       setConnected(true);
-      debug("socket connected", socket.id);
+      debug("socket connected", socket.id, { isReconnect });
+
+      if (isReconnect) {
+        // The old socket's call reservation was released by the server.
+        cleanupCall();
+        // Auto Call is a user preference: restore it after a reconnect.
+        if (autoActiveRef.current) {
+          socket.emit("auto-call-start", {});
+        }
+      }
     }
 
     function onDisconnect() {
       setConnected(false);
       debug("socket disconnected");
+      // WebRTC media cannot survive a signaling reconnect. The server has
+      // already released the call; clean up locally but keep Auto Call ON.
+      if (pcRef.current || callIdRef.current) cleanupCall();
     }
 
     function onPresence({ list }) {
@@ -727,54 +954,84 @@ export default function App() {
       setHistoryVisible(true);
     }
 
-    async function onCallInvite({ from }) {
+    async function onCallInvite({ from, callId }) {
       if (!from) return;
+      const id = callId || null;
 
       if (!allowIncomingRef.current) {
-        socket.emit("call-reject", { to: from, from: localIdRef.current });
+        socket.emit("call-reject", {
+          to: from,
+          callId: id,
+          reason: "incoming-disabled",
+        });
         return;
       }
 
-      const busy =
-        currentPartnerRef.current &&
-        currentPartnerRef.current !== from &&
-        pcRef.current;
-      if (busy) {
-        socket.emit("call-reject", { to: from, from: localIdRef.current });
+      // One active match per user: never replace a call in progress.
+      if (currentPartnerRef.current && currentPartnerRef.current !== from) {
+        socket.emit("call-reject", {
+          to: from,
+          callId: id,
+          reason: "busy",
+        });
         return;
       }
 
-      setPartner(from);
+      setCall(id, from);
 
       if (autoActiveRef.current) {
-        if (!(pcRef.current && currentPartnerRef.current === from)) {
+        if (!pcRef.current) {
           try {
             await createPeerWithMic(false);
           } catch (e) {
+            handleMediaFailure(e);
             socket.emit("call-reject", {
               to: from,
-              from: localIdRef.current,
+              callId: id,
+              reason: "media-error",
             });
-            setPartner(null);
+            cleanupCall();
             return;
           }
         }
-        socket.emit("call-accept", {
-          to: from,
-          from: localIdRef.current,
-        });
+        socket.emit("call-accept", { to: from, callId: id });
         setIncomingCall(null);
         return;
       }
 
-      setIncomingCall({ from });
+      // The microphone is only opened after the user presses Accept.
+      setIncomingCall({ from, callId: id });
     }
 
-    async function onAutoReady({ from }) {
+    async function onAutoReady({ from, callId }) {
       if (!from) return;
-      if (pcRef.current && currentPartnerRef.current === from) return;
+      const id = callId || null;
 
-      setPartner(from);
+      // The user pressed Stop Auto while this match was being announced.
+      // Do not force them into a brand-new call.
+      if (!autoActiveRef.current && !currentPartnerRef.current) {
+        socket.emit("call-reject", {
+          to: from,
+          callId: id,
+          reason: "auto-off",
+        });
+        return;
+      }
+
+      if (currentPartnerRef.current && currentPartnerRef.current !== from) {
+        socket.emit("call-reject", {
+          to: from,
+          callId: id,
+          reason: "busy",
+        });
+        return;
+      }
+      if (pcRef.current && currentPartnerRef.current === from) {
+        if (!callIdRef.current && id) callIdRef.current = id;
+        return;
+      }
+
+      setCall(id, from);
       let preparation = null;
       try {
         preparation = createPeerWithMic(false);
@@ -782,8 +1039,13 @@ export default function App() {
         await preparation;
       } catch (e) {
         if (e && e.message !== "Call cancelled") {
-          socket.emit("call-reject", { to: from, from: localIdRef.current });
-          setPartner(null);
+          handleMediaFailure(e);
+          socket.emit("call-reject", {
+            to: from,
+            callId: id,
+            reason: "media-error",
+          });
+          cleanupCall();
         }
       } finally {
         if (preparingRef.current === preparation) {
@@ -792,17 +1054,57 @@ export default function App() {
       }
     }
 
-    function onCallAccept({ from }) {
+    function onCallRinging({ to, callId }) {
+      if (!to) return;
+      if (currentPartnerRef.current && currentPartnerRef.current !== to) return;
+      setCall(callId || null, to);
+    }
+
+    function onCallAccept({ from, callId }) {
       if (!from) return;
-      setPartner(from);
-      startOfferFlow(from).catch((e) => debug("startOfferFlow error", e));
+      if (currentPartnerRef.current && currentPartnerRef.current !== from) {
+        return;
+      }
+      if (callId && callIdRef.current && callId !== callIdRef.current) {
+        return;
+      }
+      // A duplicate call-accept must never restart an offer/answer cycle.
+      if (
+        pcRef.current &&
+        currentPartnerRef.current === from &&
+        pcRef.current.localDescription
+      ) {
+        debug("duplicate call-accept ignored");
+        return;
+      }
+      setCall(callId || callIdRef.current, from);
+      startOfferFlow(from, callId || callIdRef.current).catch((e) =>
+        debug("startOfferFlow error", e)
+      );
     }
 
-    function onCallReject({ from }) {
-      if (currentPartnerRef.current === from) cleanupCall();
+    function onCallReject({ from, callId, reason }) {
+      if (callId && callIdRef.current && callId !== callIdRef.current) return;
+      // Server-generated rejects (offline/busy/disabled) carry no call id.
+      // They may only affect an idle client, never an existing call.
+      if (!callId && callIdRef.current) return;
+      if (from && currentPartnerRef.current && from !== currentPartnerRef.current) {
+        return;
+      }
+      if (reason === "offline") {
+        setCallNotice("That person is offline.");
+      } else if (reason === "busy") {
+        setCallNotice("That person is busy.");
+      } else if (reason === "incoming-disabled") {
+        setCallNotice("That person is not accepting calls.");
+      } else if (reason === "media-error") {
+        setCallNotice("The other person's microphone is unavailable.");
+      }
+      cleanupCall();
     }
 
-    function onCallHangup() {
+    function onCallHangup({ callId }) {
+      if (callId && callIdRef.current && callId !== callIdRef.current) return;
       cleanupCall();
     }
 
@@ -812,6 +1114,9 @@ export default function App() {
         typeof payload.text === "string" ? payload.text : payload.message;
       const from = payload.from || payload.sender;
       if (typeof body !== "string" || !body.trim()) return;
+      if (payload.callId && callIdRef.current && payload.callId !== callIdRef.current) {
+        return;
+      }
       if (currentPartnerRef.current && from && from !== currentPartnerRef.current) {
         return;
       }
@@ -823,10 +1128,13 @@ export default function App() {
     }
 
     function onAutoComplete() {
-      setAutoActive(false);
+      // No partner yet. Auto Call stays ON and the server keeps this user in
+      // the queue; there is nothing to turn off here.
+      debug("auto queue: waiting for a partner");
     }
 
     function onAutoStopped() {
+      autoActiveRef.current = false;
       setAutoActive(false);
     }
 
@@ -836,6 +1144,7 @@ export default function App() {
     socket.on("history", onHistory);
     socket.on("call-invite", onCallInvite);
     socket.on("auto-ready", onAutoReady);
+    socket.on("call-ringing", onCallRinging);
     socket.on("call-accept", onCallAccept);
     socket.on("call-reject", onCallReject);
     socket.on("call-hangup", onCallHangup);
@@ -854,6 +1163,7 @@ export default function App() {
       socket.off("history", onHistory);
       socket.off("call-invite", onCallInvite);
       socket.off("auto-ready", onAutoReady);
+      socket.off("call-ringing", onCallRinging);
       socket.off("call-accept", onCallAccept);
       socket.off("call-reject", onCallReject);
       socket.off("call-hangup", onCallHangup);
@@ -868,28 +1178,33 @@ export default function App() {
 
   function inviteCall(targetId) {
     if (!targetId || !connected) return;
-    setPartner(targetId);
-    socket.emit("call-invite", {
-      to: targetId,
-      from: localIdRef.current,
-    });
+    if (currentPartnerRef.current || pcRef.current) return;
+    setCallNotice("");
+    // The server assigns the call id and confirms with "call-ringing".
+    socket.emit("call-invite", { to: targetId });
   }
 
   async function acceptIncoming() {
     if (!incomingCall) return;
     const from = incomingCall.from;
-    setPartner(from);
+    const callId = incomingCall.callId || callIdRef.current || null;
+    setCall(callId, from);
+    setCallNotice("");
 
     try {
       await createPeerWithMic(false);
     } catch (err) {
-      socket.emit("call-reject", { to: from, from: localIdRef.current });
-      setIncomingCall(null);
-      setPartner(null);
+      handleMediaFailure(err);
+      socket.emit("call-reject", {
+        to: from,
+        callId,
+        reason: "media-error",
+      });
+      cleanupCall();
       return;
     }
 
-    socket.emit("call-accept", { to: from, from: localIdRef.current });
+    socket.emit("call-accept", { to: from, callId });
     setIncomingCall(null);
     playAudioElement(remoteAudioRef.current);
   }
@@ -898,17 +1213,18 @@ export default function App() {
     if (!incomingCall) return;
     socket.emit("call-reject", {
       to: incomingCall.from,
-      from: localIdRef.current,
+      callId: incomingCall.callId || null,
+      reason: "rejected",
     });
-    setIncomingCall(null);
-    setPartner(null);
+    cleanupCall();
   }
 
   function hangup() {
     const partner = currentPartnerRef.current;
     socket.emit("call-hangup", {
-      from: localIdRef.current,
       to: partner || null,
+      callId: callIdRef.current || null,
+      reason: "hangup",
     });
     cleanupCall();
   }
@@ -932,6 +1248,7 @@ export default function App() {
     const payload = {
       type: "chat",
       sender: localIdRef.current,
+      callId: callIdRef.current || null,
       text: body,
     };
 
@@ -952,6 +1269,7 @@ export default function App() {
 
   function startAutoCall() {
     if (!connected) return;
+    setCallNotice("");
     autoActiveRef.current = true;
     socket.emit("auto-call-start", { initiator: localIdRef.current });
     setAutoActive(true);
@@ -1117,6 +1435,9 @@ export default function App() {
                         ? `${onlineList.length} online — start Auto Call to connect`
                         : "Connecting..."}
                     </p>
+                    {callNotice && (
+                      <p className="call-notice">{callNotice}</p>
+                    )}
                   </div>
                 </motion.div>
               )}

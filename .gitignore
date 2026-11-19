@@ -27,6 +27,7 @@ npm-debug.log*
 # Test coverage
 coverage/
 .nyc_output/
+client/test/artifacts/
 
 # Temporary files
 tmp/

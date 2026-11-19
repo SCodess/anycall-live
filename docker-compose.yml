@@ -1,5 +1,17 @@
 version: "3.8"
+
+# Optional self-hosted layout. The production app runs on Vercel (client) and
+# Railway (server + Redis). This file is a starting point for a single host:
+# supply Dockerfiles/images for server/client before `docker compose build`.
 services:
+  redis:
+    image: redis:7-alpine
+    container_name: anycall_redis
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    networks:
+      - anycall_net
+
   server:
     build: ./server
     container_name: anycall_server
@@ -8,6 +20,11 @@ services:
       - "3000:3000"
     environment:
       - NODE_ENV=production
+      # Required for more than one backend instance and for restarts to keep
+      # presence/reservations consistent. Remove it for single-instance memory.
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - redis
     networks:
       - anycall_net
 
@@ -35,11 +52,21 @@ services:
     image: instrumentisto/coturn
     container_name: anycall_coturn
     restart: unless-stopped
-    environment:
-      - REALM=yourdomain.com
+    # Replace the user/password below. Open these relay ports in the host
+    # firewall and set --external-ip=<public-ip>/<private-ip> when behind NAT.
+    command:
+      - "-n"
+      - "--lt-cred-mech"
+      - "--realm=anycall"
+      - "--user=anycall:change-me"
+      - "--fingerprint"
+      - "--no-cli"
+      - "--min-port=49160"
+      - "--max-port=49200"
     ports:
       - "3478:3478"
       - "3478:3478/udp"
+      - "49160-49200:49160-49200/udp"
     networks:
       - anycall_net
 
