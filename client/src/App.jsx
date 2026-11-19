@@ -55,33 +55,29 @@ const STUN_SERVERS = [
 //   VITE_TURN_URL=turn:turn.example.com:3478
 //   VITE_TURN_USERNAME=...
 //   VITE_TURN_CREDENTIAL=...
-// Without it, the public Open Relay fallback is used (best effort only).
+// Without it only STUN is used: direct calls work, but symmetric NAT /
+// mobile networks need a real TURN server. The old public Open Relay
+// credentials were tested and returned no relay candidates, so they are not
+// shipped as a fallback.
 const CUSTOM_TURN_URL = (import.meta.env.VITE_TURN_URL || "").trim();
 const CUSTOM_TURN_USERNAME = import.meta.env.VITE_TURN_USERNAME || "";
 const CUSTOM_TURN_CREDENTIAL = import.meta.env.VITE_TURN_CREDENTIAL || "";
 
-const PUBLIC_TURN = {
-  urls: [
-    "turn:openrelay.metered.ca:80",
-    "turn:openrelay.metered.ca:443",
-    "turn:openrelay.metered.ca:443?transport=tcp",
-  ],
-  username: "openrelayproject",
-  credential: "openrelayproject",
-};
+const ICE_SERVERS = [{ urls: STUN_SERVERS }];
 
-const ICE_SERVERS = [
-  { urls: STUN_SERVERS },
-  CUSTOM_TURN_URL
-    ? {
-        urls: CUSTOM_TURN_URL.split(",")
-          .map((url) => url.trim())
-          .filter(Boolean),
-        username: CUSTOM_TURN_USERNAME,
-        credential: CUSTOM_TURN_CREDENTIAL,
-      }
-    : PUBLIC_TURN,
-];
+if (CUSTOM_TURN_URL) {
+  ICE_SERVERS.push({
+    urls: CUSTOM_TURN_URL.split(",")
+      .map((url) => url.trim())
+      .filter(Boolean),
+    username: CUSTOM_TURN_USERNAME,
+    credential: CUSTOM_TURN_CREDENTIAL,
+  });
+} else {
+  console.warn(
+    "[anycall] No TURN server configured. Calls across symmetric NAT may fail."
+  );
+}
 
 try {
   window.__ANY_CALL_ICE = ICE_SERVERS;
