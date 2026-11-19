@@ -1,12 +1,13 @@
 [build]
 builder = "NIXPACKS"
-buildCommand = "cd server && npm install"
+# Railway's service root may be the repo root or the server/ directory.
+# These commands work in both cases instead of assuming one layout.
+buildCommand = "if [ -f server/package.json ]; then cd server && npm install; else npm install; fi"
 
 [deploy]
-startCommand = "cd server && node index.js"
+startCommand = "if [ -f server/index.js ]; then node server/index.js; else node index.js; fi"
 healthcheckPath = "/health"
 healthcheckTimeout = 100
 
 [env]
-PORT = "3000"
 NODE_ENV = "production"
