@@ -19,6 +19,14 @@ const PREFIX = {
   call: "anycall:call:",
   callByUser: "anycall:callByUser:",
   cooldown: "anycall:cooldown:",
+  profile: "anycall:profile:",
+  friends: "anycall:friends:",
+  friendIn: "anycall:friendReqIn:",
+  friendOut: "anycall:friendReqOut:",
+  history: "anycall:history:",
+  reports: "anycall:reports",
+  blocks: "anycall:blocks:",
+  bans: "anycall:bans",
 };
 
 const USER_TTL_SECONDS = 90;
@@ -36,6 +44,19 @@ class MemoryStore {
     this.queue = [];
     this.queued = new Set();
     this.cooldowns = new Map();
+    this.profiles = new Map();
+    this.friends = new Map();
+    this.friendIn = new Map();
+    this.friendOut = new Map();
+    this.history = new Map();
+    this.reports = [];
+    this.blocks = new Map();
+    this.bans = new Set();
+  }
+
+  _setFor(map, id) {
+    if (!map.has(id)) map.set(id, new Set());
+    return map.get(id);
   }
 
   async addUser(user) {
@@ -196,6 +217,196 @@ class MemoryStore {
     this.cooldowns.set(id, { partner, until: Date.now() + ms });
   }
 
+  async saveProfile(profile) {
+    if (!profile || !profile.id) return null;
+    const existing = this.profiles.get(profile.id) || {};
+    const merged = {
+      ...existing,
+      ...profile,
+      id: profile.id,
+      updatedAt: Date.now(),
+    };
+    this.profiles.set(profile.id, merged);
+    return { ...merged };
+  }
+
+  async getProfile(id) {
+    const profile = this.profiles.get(id);
+    return profile ? { ...profile } : null;
+  }
+
+  async getProfiles(ids) {
+    return (ids || [])
+      .map((id) => this.profiles.get(id))
+      .filter(Boolean)
+      .map((profile) => ({ ...profile }));
+  }
+
+  async sendFriendRequest(from, to) {
+    if (!from || !to || from === to) return { ok: false, status: "invalid" };
+    if (this._setFor(this.friends, from).has(to)) {
+      return { ok: true, status: "friends" };
+    }
+    this._setFor(this.friendOut, from).add(to);
+    this._setFor(this.friendIn, to).add(from);
+    return { ok: true, status: "pending" };
+  }
+
+  async acceptFriendRequest(actor, from) {
+    if (!actor || !from || actor === from) return false;
+    const incoming = this.friendIn.get(actor);
+    if (!incoming || !incoming.has(from)) return false;
+    incoming.delete(from);
+    const outgoing = this.friendOut.get(from);
+    if (outgoing) outgoing.delete(actor);
+    this._setFor(this.friends, actor).add(from);
+    this._setFor(this.friends, from).add(actor);
+    return true;
+  }
+
+  async declineFriendRequest(actor, from) {
+    if (!actor || !from) return false;
+    const incoming = this.friendIn.get(actor);
+    if (!incoming || !incoming.has(from)) return false;
+    incoming.delete(from);
+    const outgoing = this.friendOut.get(from);
+    if (outgoing) outgoing.delete(actor);
+    return true;
+  }
+
+  async removeFriend(a, b) {
+    if (!a || !b) return false;
+    const fa = this.friends.get(a);
+    const fb = this.friends.get(b);
+    if (fa) fa.delete(b);
+    if (fb) fb.delete(a);
+    return true;
+  }
+
+  async getSocial(id) {
+    return {
+      friends: Array.from(this.friends.get(id) || []),
+      incoming: Array.from(this.friendIn.get(id) || []),
+      outgoing: Array.from(this.friendOut.get(id) || []),
+    };
+  }
+
+  async areFriends(a, b) {
+    return !!(this.friends.get(a) && this.friends.get(a).has(b));
+  }
+
+  async addHistory(id, entry) {
+    if (!id) return;
+    const list = this.history.get(id) || [];
+    list.unshift({ ...entry, at: Date.now() });
+    if (list.length > 100) list.length = 100;
+    this.history.set(id, list);
+  }
+
+  async getHistory(id, limit = 100) {
+    return (this.history.get(id) || []).slice(0, limit).map((item) => ({
+      ...item,
+    }));
+  }
+
+  async addReport(report) {
+    this.reports.unshift({ ...report, at: Date.now() });
+    if (this.reports.length > 500) this.reports.length = 500;
+    return report;
+  }
+
+  async listReports(limit = 200) {
+    return this.reports.slice(0, limit).map((report) => ({ ...report }));
+  }
+
+  async ban(id, reason) {
+    if (!id) return false;
+    this.bans.add(id);
+    const profile = this.profiles.get(id);
+    if (profile) {
+      profile.banned = true;
+      profile.banReason = reason || "violation";
+      profile.updatedAt = Date.now();
+    }
+    return true;
+  }
+
+  async unban(id) {
+    this.bans.delete(id);
+    const profile = this.profiles.get(id);
+    if (profile) {
+      profile.banned = false;
+      delete profile.banReason;
+      profile.updatedAt = Date.now();
+    }
+    return true;
+  }
+
+  async isBanned(id) {
+    const profile = this.profiles.get(id);
+    return this.bans.has(id) || !!(profile && profile.banned);
+  }
+
+  async block(a, b) {
+    if (!a || !b || a === b) return false;
+    this._setFor(this.blocks, a).add(b);
+    return true;
+  }
+
+  async unblock(a, b) {
+    const set = this.blocks.get(a);
+    if (set) set.delete(b);
+    return true;
+  }
+
+  async getBlocks(id) {
+    return Array.from(this.blocks.get(id) || []);
+  }
+
+  async isBlocked(a, b) {
+    if (!a || !b) return false;
+    const ab = this.blocks.get(a);
+    const ba = this.blocks.get(b);
+    return !!((ab && ab.has(b)) || (ba && ba.has(a)));
+  }
+
+  async listQueueUsers() {
+    return this.queue
+      .map((id) => this.users.get(id))
+      .filter(Boolean)
+      .map((user) => ({ ...user }));
+  }
+
+  // Atomic with respect to the event loop. Both users must still be queued,
+  // free, and compatible when the pair is reserved.
+  async pairUsers(callId, a, b) {
+    if (!callId || !a || !b || a === b) return null;
+    if (!this.users.has(a) || !this.users.has(b)) return null;
+    if (!this.queued.has(a) || !this.queued.has(b)) return null;
+    if (this.callByUser.has(a) || this.callByUser.has(b)) return null;
+    if (this._isCooling(a, b)) return null;
+
+    this.queued.delete(a);
+    this.queued.delete(b);
+    const ia = this.queue.indexOf(a);
+    if (ia >= 0) this.queue.splice(ia, 1);
+    const ib = this.queue.indexOf(b);
+    if (ib >= 0) this.queue.splice(ib, 1);
+
+    const call = {
+      id: callId,
+      caller: a,
+      callee: b,
+      state: "connecting",
+      kind: "auto",
+      createdAt: Date.now(),
+    };
+    this.calls.set(callId, call);
+    this.callByUser.set(a, callId);
+    this.callByUser.set(b, callId);
+    return { ...call };
+  }
+
   async heartbeat() {}
 
   async close() {}
@@ -292,6 +503,48 @@ if ca == b or cb == a then
   redis.call('SADD', queuedKey, b)
   return nil
 end
+
+redis.call('HSET', callPrefix .. callId,
+  'caller', a,
+  'callee', b,
+  'state', 'connecting',
+  'kind', 'auto',
+  'createdAt', now)
+redis.call('EXPIRE', callPrefix .. callId, ttl)
+redis.call('SET', callByUserPrefix .. a, callId, 'EX', ttl)
+redis.call('SET', callByUserPrefix .. b, callId, 'EX', ttl)
+return {a, b, callId}
+`;
+
+const PAIR_USERS_SCRIPT = `
+local queueKey = KEYS[1]
+local queuedKey = KEYS[2]
+local userPrefix = ARGV[1]
+local callByUserPrefix = ARGV[2]
+local callPrefix = ARGV[3]
+local cooldownPrefix = ARGV[4]
+local callId = ARGV[5]
+local a = ARGV[6]
+local b = ARGV[7]
+local now = ARGV[8]
+local ttl = tonumber(ARGV[9])
+
+if a == b then return nil end
+if redis.call('EXISTS', userPrefix .. a) == 0 then return nil end
+if redis.call('EXISTS', userPrefix .. b) == 0 then return nil end
+if redis.call('SISMEMBER', queuedKey, a) == 0 then return nil end
+if redis.call('SISMEMBER', queuedKey, b) == 0 then return nil end
+if redis.call('EXISTS', callByUserPrefix .. a) == 1 then return nil end
+if redis.call('EXISTS', callByUserPrefix .. b) == 1 then return nil end
+
+local ca = redis.call('GET', cooldownPrefix .. a)
+local cb = redis.call('GET', cooldownPrefix .. b)
+if ca == b or cb == a then return nil end
+
+redis.call('SREM', queuedKey, a)
+redis.call('LREM', queueKey, 0, a)
+redis.call('SREM', queuedKey, b)
+redis.call('LREM', queueKey, 0, b)
 
 redis.call('HSET', callPrefix .. callId,
   'caller', a,
@@ -568,6 +821,263 @@ class RedisStore {
 
   async setCooldown(id, partner, ms) {
     await this.client.set(`${PREFIX.cooldown}${id}`, partner, { PX: ms });
+  }
+
+  async saveProfile(profile) {
+    if (!profile || !profile.id) return null;
+    const key = `${PREFIX.profile}${profile.id}`;
+    const raw = await this.client.get(key);
+    let existing = {};
+    if (raw) {
+      try {
+        existing = JSON.parse(raw);
+      } catch (e) {
+        existing = {};
+      }
+    }
+    const merged = {
+      ...existing,
+      ...profile,
+      id: profile.id,
+      updatedAt: Date.now(),
+    };
+    await this.client.set(key, JSON.stringify(merged));
+    return merged;
+  }
+
+  async getProfile(id) {
+    const raw = await this.client.get(`${PREFIX.profile}${id}`);
+    if (!raw) return null;
+    try {
+      return JSON.parse(raw);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  async getProfiles(ids) {
+    if (!ids || !ids.length) return [];
+    const raws = await this.client.mGet(
+      ids.map((id) => `${PREFIX.profile}${id}`)
+    );
+    const profiles = [];
+    raws.forEach((raw) => {
+      if (!raw) return;
+      try {
+        profiles.push(JSON.parse(raw));
+      } catch (e) {}
+    });
+    return profiles;
+  }
+
+  async sendFriendRequest(from, to) {
+    if (!from || !to || from === to) return { ok: false, status: "invalid" };
+    if (await this.client.sIsMember(`${PREFIX.friends}${from}`, to)) {
+      return { ok: true, status: "friends" };
+    }
+    await this.client
+      .multi()
+      .sAdd(`${PREFIX.friendOut}${from}`, to)
+      .sAdd(`${PREFIX.friendIn}${to}`, from)
+      .exec();
+    return { ok: true, status: "pending" };
+  }
+
+  async acceptFriendRequest(actor, from) {
+    if (!actor || !from || actor === from) return false;
+    const pending = await this.client.sIsMember(
+      `${PREFIX.friendIn}${actor}`,
+      from
+    );
+    if (!pending) return false;
+    await this.client
+      .multi()
+      .sRem(`${PREFIX.friendIn}${actor}`, from)
+      .sRem(`${PREFIX.friendOut}${from}`, actor)
+      .sAdd(`${PREFIX.friends}${actor}`, from)
+      .sAdd(`${PREFIX.friends}${from}`, actor)
+      .exec();
+    return true;
+  }
+
+  async declineFriendRequest(actor, from) {
+    if (!actor || !from) return false;
+    const pending = await this.client.sIsMember(
+      `${PREFIX.friendIn}${actor}`,
+      from
+    );
+    if (!pending) return false;
+    await this.client
+      .multi()
+      .sRem(`${PREFIX.friendIn}${actor}`, from)
+      .sRem(`${PREFIX.friendOut}${from}`, actor)
+      .exec();
+    return true;
+  }
+
+  async removeFriend(a, b) {
+    if (!a || !b) return false;
+    await this.client
+      .multi()
+      .sRem(`${PREFIX.friends}${a}`, b)
+      .sRem(`${PREFIX.friends}${b}`, a)
+      .exec();
+    return true;
+  }
+
+  async getSocial(id) {
+    const [friends, incoming, outgoing] = await Promise.all([
+      this.client.sMembers(`${PREFIX.friends}${id}`),
+      this.client.sMembers(`${PREFIX.friendIn}${id}`),
+      this.client.sMembers(`${PREFIX.friendOut}${id}`),
+    ]);
+    return { friends, incoming, outgoing };
+  }
+
+  async areFriends(a, b) {
+    if (!a || !b) return false;
+    return !!(await this.client.sIsMember(`${PREFIX.friends}${a}`, b));
+  }
+
+  async addHistory(id, entry) {
+    if (!id) return;
+    const key = `${PREFIX.history}${id}`;
+    await this.client.lPush(key, JSON.stringify({ ...entry, at: Date.now() }));
+    await this.client.lTrim(key, 0, 99);
+  }
+
+  async getHistory(id, limit = 100) {
+    const raws = await this.client.lRange(
+      `${PREFIX.history}${id}`,
+      0,
+      Math.max(0, limit - 1)
+    );
+    return raws
+      .map((raw) => {
+        try {
+          return JSON.parse(raw);
+        } catch (e) {
+          return null;
+        }
+      })
+      .filter(Boolean);
+  }
+
+  async addReport(report) {
+    await this.client.lPush(
+      PREFIX.reports,
+      JSON.stringify({ ...report, at: Date.now() })
+    );
+    await this.client.lTrim(PREFIX.reports, 0, 499);
+    return report;
+  }
+
+  async listReports(limit = 200) {
+    const raws = await this.client.lRange(
+      PREFIX.reports,
+      0,
+      Math.max(0, limit - 1)
+    );
+    return raws
+      .map((raw) => {
+        try {
+          return JSON.parse(raw);
+        } catch (e) {
+          return null;
+        }
+      })
+      .filter(Boolean);
+  }
+
+  async ban(id, reason) {
+    if (!id) return false;
+    await this.client.sAdd(PREFIX.bans, id);
+    const profile = await this.getProfile(id);
+    if (profile) {
+      await this.saveProfile({
+        ...profile,
+        banned: true,
+        banReason: reason || "violation",
+      });
+    }
+    return true;
+  }
+
+  async unban(id) {
+    await this.client.sRem(PREFIX.bans, id);
+    const profile = await this.getProfile(id);
+    if (profile) {
+      await this.saveProfile({ ...profile, banned: false, banReason: null });
+    }
+    return true;
+  }
+
+  async isBanned(id) {
+    if (!id) return false;
+    if (await this.client.sIsMember(PREFIX.bans, id)) return true;
+    const profile = await this.getProfile(id);
+    return !!(profile && profile.banned);
+  }
+
+  async block(a, b) {
+    if (!a || !b || a === b) return false;
+    await this.client.sAdd(`${PREFIX.blocks}${a}`, b);
+    return true;
+  }
+
+  async unblock(a, b) {
+    await this.client.sRem(`${PREFIX.blocks}${a}`, b);
+    return true;
+  }
+
+  async getBlocks(id) {
+    return this.client.sMembers(`${PREFIX.blocks}${id}`);
+  }
+
+  async isBlocked(a, b) {
+    if (!a || !b) return false;
+    const [ab, ba] = await Promise.all([
+      this.client.sIsMember(`${PREFIX.blocks}${a}`, b),
+      this.client.sIsMember(`${PREFIX.blocks}${b}`, a),
+    ]);
+    return !!(ab || ba);
+  }
+
+  async listQueueUsers() {
+    const ids = await this.client.lRange(PREFIX.queue, 0, -1);
+    if (!ids.length) return [];
+    const raws = await this.client.mGet(
+      ids.map((id) => `${PREFIX.user}${id}`)
+    );
+    return raws
+      .map((raw) => {
+        if (!raw) return null;
+        try {
+          return JSON.parse(raw);
+        } catch (e) {
+          return null;
+        }
+      })
+      .filter(Boolean);
+  }
+
+  async pairUsers(callId, a, b) {
+    const result = await this.client.eval(PAIR_USERS_SCRIPT, {
+      keys: [PREFIX.queue, PREFIX.queued],
+      arguments: [
+        PREFIX.user,
+        PREFIX.callByUser,
+        PREFIX.call,
+        PREFIX.cooldown,
+        callId,
+        a,
+        b,
+        String(Date.now()),
+        String(CALL_TTL_SECONDS),
+      ],
+    });
+    if (!Array.isArray(result) || result.length < 3) return null;
+    return this.getCall(callId);
   }
 
   // Refresh presence + active-call TTLs. Called for users connected to this

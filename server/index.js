@@ -17,6 +17,8 @@ const express = require("express");
 const http = require("http");
 const cors = require("cors");
 const crypto = require("crypto");
+const jwt = require("jsonwebtoken");
+const geoip = require("geoip-lite");
 const { Server } = require("socket.io");
 const { MemoryStore, createRedisStore } = require("./store");
 
@@ -34,9 +36,15 @@ const MATCH_COOLDOWN_MS = Math.max(
   Number(process.env.MATCH_COOLDOWN_MS || 4000)
 );
 
+const GUEST_TOKEN_SECRET =
+  process.env.GUEST_TOKEN_SECRET || "anycall-dev-guest-secret-change-me";
+const GUEST_TOKEN_TTL = "30d";
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "";
+
 const app = express();
+app.set("trust proxy", 1);
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "32kb" }));
 
 const server = http.createServer(app);
 const io = new Server(server, {
@@ -50,7 +58,6 @@ const io = new Server(server, {
 
 let store = new MemoryStore();
 let redisClient = null;
-const history = [];
 const callTimers = new Map();
 
 /* -------------------------------------------------------------------------- */
@@ -65,17 +72,270 @@ function countryToFlag(cc) {
   );
 }
 
-function pushHistoryEntry(id, country) {
-  if (!id) return;
-  const entry = {
-    id,
-    country: country || null,
-    flag: countryToFlag(country),
-    last: Date.now(),
-    online: true,
+const NAME_ADJECTIVES = [
+  "Calm",
+  "Bright",
+  "Cosmic",
+  "Gentle",
+  "Lucky",
+  "Mellow",
+  "Neon",
+  "Quiet",
+  "Sunny",
+  "Swift",
+  "Velvet",
+  "Witty",
+];
+const NAME_ANIMALS = [
+  "Otter",
+  "Panda",
+  "Fox",
+  "Koala",
+  "Lynx",
+  "Mango",
+  "Nova",
+  "Orca",
+  "Robin",
+  "Tiger",
+  "Wolf",
+  "Yuki",
+];
+
+function cleanText(value, max = 24) {
+  if (typeof value !== "string") return "";
+  return value
+    .replace(/[\u0000-\u001f\u007f]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, max);
+}
+
+function normalizeCountry(value) {
+  if (typeof value !== "string") return null;
+  const code = value.trim().toUpperCase();
+  return /^[A-Z]{2}$/.test(code) ? code : null;
+}
+
+function normalizeGender(value, fallback = "other") {
+  return ["male", "female", "other"].includes(value) ? value : fallback;
+}
+
+function normalizeInterests(value) {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set();
+  const interests = [];
+  for (const item of value) {
+    const text = cleanText(item, 24);
+    if (!text) continue;
+    const key = text.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    interests.push(text);
+    if (interests.length >= 8) break;
+  }
+  return interests;
+}
+
+function normalizeFilters(value) {
+  const input = value && typeof value === "object" ? value : {};
+  const country =
+    input.country && input.country !== "any"
+      ? normalizeCountry(input.country) || "any"
+      : "any";
+  return {
+    gender: ["any", "male", "female", "other"].includes(input.gender)
+      ? input.gender
+      : "any",
+    country,
+    interests: normalizeInterests(input.interests),
   };
-  history.unshift(entry);
-  if (history.length > 200) history.pop();
+}
+
+function randomGuestName() {
+  const adjective =
+    NAME_ADJECTIVES[Math.floor(Math.random() * NAME_ADJECTIVES.length)];
+  const animal =
+    NAME_ANIMALS[Math.floor(Math.random() * NAME_ANIMALS.length)];
+  return `${adjective}${animal}${Math.floor(10 + Math.random() * 90)}`;
+}
+
+function lookupCountry(req) {
+  try {
+    const forwarded = String(req.headers["x-forwarded-for"] || "")
+      .split(",")[0]
+      .trim();
+    const ip = (forwarded || req.ip || "").replace(/^::ffff:/, "");
+    if (!ip || ip === "::1" || ip.startsWith("127.")) return null;
+    const geo = geoip.lookup(ip);
+    return geo && geo.country ? normalizeCountry(geo.country) : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function publicProfile(profile) {
+  if (!profile) return null;
+  return {
+    id: profile.id,
+    name: profile.name,
+    avatar: profile.avatar,
+    gender: profile.gender,
+    country: profile.country || null,
+    flag: countryToFlag(profile.country),
+    interests: Array.isArray(profile.interests) ? profile.interests : [],
+    filters: normalizeFilters(profile.filters),
+    allowIncoming: profile.allowIncoming !== false,
+    createdAt: profile.createdAt || null,
+  };
+}
+
+async function createGuestProfile(body = {}, req = {}) {
+  const profile = {
+    id: crypto.randomUUID(),
+    name: cleanText(body.name, 24) || randomGuestName(),
+    avatar: Math.floor(Math.random() * 12),
+    gender: normalizeGender(body.gender, "other"),
+    country: normalizeCountry(body.country) || lookupCountry(req),
+    interests: normalizeInterests(body.interests),
+    filters: normalizeFilters(body.filters),
+    allowIncoming: body.allowIncoming !== false,
+    banned: false,
+    createdAt: Date.now(),
+  };
+  return store.saveProfile(profile);
+}
+
+function signGuestToken(guestId) {
+  return jwt.sign({ sub: guestId }, GUEST_TOKEN_SECRET, {
+    expiresIn: GUEST_TOKEN_TTL,
+  });
+}
+
+function verifyGuestToken(token) {
+  if (!token || typeof token !== "string") return null;
+  try {
+    const payload = jwt.verify(token, GUEST_TOKEN_SECRET);
+    return payload && typeof payload.sub === "string" ? payload.sub : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function bearerToken(req) {
+  const header = req.headers.authorization || "";
+  const match = /^Bearer\s+(.+)$/i.exec(header);
+  return match ? match[1].trim() : "";
+}
+
+function authGuest(req, res, next) {
+  const guestId = verifyGuestToken(bearerToken(req));
+  if (!guestId) return res.status(401).json({ error: "unauthorized" });
+  req.guestId = guestId;
+  next();
+}
+
+function adminOnly(req, res, next) {
+  if (!ADMIN_TOKEN) return res.status(404).json({ error: "not-found" });
+  if (req.headers["x-admin-token"] !== ADMIN_TOKEN) {
+    return res.status(403).json({ error: "forbidden" });
+  }
+  next();
+}
+
+function profileSummary(user) {
+  if (!user) return null;
+  return {
+    guestId: user.guestId || null,
+    name: user.name || null,
+    avatar: user.avatar != null ? user.avatar : null,
+    gender: user.gender || null,
+    country: user.country || null,
+    flag: countryToFlag(user.country),
+    interests: Array.isArray(user.interests) ? user.interests : [],
+  };
+}
+
+// Blocks and bans are stored against the persistent guest identity. Anonymous
+// sockets (old clients / raw tests) fall back to the socket id.
+function identityOf(user) {
+  if (!user) return null;
+  return user.guestId || user.id || null;
+}
+
+// Match only when both sides' filters accept the other person. Missing
+// profile fields default to "any", so old clients still match.
+function isCompatible(a, b) {
+  if (!a || !b) return false;
+  const af = normalizeFilters(a.filters);
+  const bf = normalizeFilters(b.filters);
+  if (af.gender !== "any" && b.gender !== af.gender) return false;
+  if (bf.gender !== "any" && a.gender !== bf.gender) return false;
+  if (af.country !== "any" && b.country !== af.country) return false;
+  if (bf.country !== "any" && a.country !== bf.country) return false;
+
+  const ai = normalizeInterests(a.interests).map((i) => i.toLowerCase());
+  const bi = normalizeInterests(b.interests).map((i) => i.toLowerCase());
+  if (af.interests.length && !af.interests.some((i) => bi.includes(i.toLowerCase()))) {
+    return false;
+  }
+  if (bf.interests.length && !bf.interests.some((i) => ai.includes(i.toLowerCase()))) {
+    return false;
+  }
+  return true;
+}
+
+async function recordCallHistory(call, reason) {
+  const [caller, callee] = await Promise.all([
+    store.getUser(call.caller),
+    store.getUser(call.callee),
+  ]);
+  const endedAt = Date.now();
+  const startedAt =
+    call.connectedAt || call.acceptedAt || call.createdAt || endedAt;
+  const durationMs = Math.max(0, endedAt - startedAt);
+
+  const add = async (me, other, direction) => {
+    if (!me) return;
+    const id = me.guestId || me.id;
+    await store.addHistory(id, {
+      callId: call.id,
+      partnerGuestId: other ? other.guestId || null : null,
+      partnerId: other ? other.id : null,
+      partnerName: other ? other.name || null : null,
+      partnerAvatar: other && other.avatar != null ? other.avatar : null,
+      country: other ? other.country || null : null,
+      flag: countryToFlag(other && other.country),
+      startedAt,
+      endedAt,
+      durationMs,
+      direction: call.kind === "auto" ? "auto" : direction,
+      kind: call.kind || "invite",
+      reason: reason || "ended",
+    });
+  };
+
+  await Promise.all([
+    add(caller, callee, "outgoing"),
+    add(callee, caller, "incoming"),
+  ]);
+}
+
+async function syncGuestToSockets(guestId, profile) {
+  const sockets = await io.in(`guest:${guestId}`).fetchSockets();
+  await Promise.all(
+    sockets.map((socket) =>
+      store.updateUser(socket.id, {
+        guestId,
+        name: profile.name,
+        avatar: profile.avatar,
+        gender: profile.gender,
+        country: profile.country || null,
+        interests: profile.interests || [],
+        filters: normalizeFilters(profile.filters),
+        allowIncoming: profile.allowIncoming !== false,
+      })
+    )
+  );
 }
 
 let presenceTimer = null;
@@ -85,12 +345,32 @@ function schedulePresence() {
     presenceTimer = null;
     try {
       const users = await store.listUsers();
+      const byKey = new Map();
+      for (const user of users) {
+        const key = user.guestId || user.id;
+        const existing = byKey.get(key);
+        if (!existing) {
+          byKey.set(key, user);
+          continue;
+        }
+        // Several tabs / sockets can belong to one guest. Show the richest
+        // record so the online list still has a name and avatar.
+        const score = (item) =>
+          (item.guestId ? 2 : 0) + (item.name ? 1 : 0) + (item.country ? 1 : 0);
+        if (score(user) > score(existing)) byKey.set(key, user);
+      }
+      const unique = Array.from(byKey.values());
       io.emit("presence", {
-        count: users.length,
-        list: users.map((user) => ({
+        count: unique.length,
+        list: unique.map((user) => ({
           id: user.id,
+          guestId: user.guestId || null,
+          name: user.name || null,
+          avatar: user.avatar != null ? user.avatar : null,
+          gender: user.gender || null,
           country: user.country || null,
           flag: countryToFlag(user.country),
+          interests: Array.isArray(user.interests) ? user.interests : [],
           online: true,
           autoActive: !!user.autoActive,
         })),
@@ -149,10 +429,22 @@ async function requeueIfEligible(id) {
 // Idempotent: endCall() returns null the second time, so duplicate hangups
 // never emit twice and never requeue twice.
 async function finishCall(callId, reason, actorId, options = {}) {
+  // Redis endCall() only returns the participants, so history needs a
+  // snapshot taken before the reservation is deleted.
+  const snapshot = await store.getCall(callId);
   const call = await store.endCall(callId);
   if (!call) return null;
 
   clearCallTimeout(callId);
+
+  // Only real conversations (accepted or connected) belong in call history.
+  if (snapshot && (snapshot.acceptedAt || snapshot.connectedAt)) {
+    try {
+      await recordCallHistory(snapshot, reason);
+    } catch (err) {
+      console.error("[history]", err.message);
+    }
+  }
 
   const payload = {
     callId,
@@ -176,35 +468,68 @@ async function finishCall(callId, reason, actorId, options = {}) {
 }
 
 async function announcePair(call) {
-  io.to(call.callee).emit("auto-ready", {
-    from: call.caller,
-    callId: call.id,
-  });
-  io.to(call.caller).emit("call-accept", {
-    from: call.callee,
-    callId: call.id,
-  });
-  scheduleCallTimeout(call.id);
   const [caller, callee] = await Promise.all([
     store.getUser(call.caller),
     store.getUser(call.callee),
   ]);
-  pushHistoryEntry(call.caller, caller && caller.country);
-  pushHistoryEntry(call.callee, callee && callee.country);
+
+  io.to(call.callee).emit("auto-ready", {
+    from: call.caller,
+    callId: call.id,
+    partner: profileSummary(caller),
+  });
+  io.to(call.caller).emit("call-accept", {
+    from: call.callee,
+    callId: call.id,
+    partner: profileSummary(callee),
+  });
+  scheduleCallTimeout(call.id);
   console.log(`[auto-match] ${call.caller} <-> ${call.callee} (${call.id})`);
 }
 
-// Pairs as many waiting users as possible. store.tryPair() is atomic, so two
-// simultaneous callers can never reserve the same user twice.
+let matchRunning = false;
+let matchPending = false;
+
+// Pairs as many waiting users as possible. Compatibility is mutual: both
+// users' filters must accept the other person, and blocked pairs never match.
+// store.pairUsers() is atomic, so simultaneous matcher runs (including runs on
+// other backend instances) cannot reserve the same user twice.
 async function tryMatch() {
-  if ((await store.queueSize()) < 2) return;
-  for (let i = 0; i < 500; i += 1) {
-    const callId = crypto.randomUUID();
-    const call = await store.tryPair(callId);
-    if (!call) break;
-    await announcePair(call);
+  if (matchRunning) {
+    matchPending = true;
+    return;
   }
-  schedulePresence();
+  matchRunning = true;
+  try {
+    if ((await store.queueSize()) < 2) return;
+    const users = await store.listQueueUsers();
+    const used = new Set();
+
+    for (let i = 0; i < users.length; i += 1) {
+      const a = users[i];
+      if (used.has(a.id)) continue;
+      for (let j = i + 1; j < users.length; j += 1) {
+        const b = users[j];
+        if (used.has(b.id)) continue;
+        if (!isCompatible(a, b)) continue;
+        if (await store.isBlocked(identityOf(a), identityOf(b))) continue;
+
+        const call = await store.pairUsers(crypto.randomUUID(), a.id, b.id);
+        if (!call) continue; // stale queue entry / cooldown / busy
+        used.add(a.id);
+        used.add(b.id);
+        await announcePair(call);
+        break;
+      }
+    }
+  } finally {
+    matchRunning = false;
+  }
+
+  if (matchPending) {
+    matchPending = false;
+    tryMatch().catch((err) => console.error("[match]", err.message));
+  }
 }
 
 async function getCallForSocket(socketId, callId) {
@@ -262,6 +587,359 @@ app.get("/debug/state", async (req, res) => {
 });
 
 /* -------------------------------------------------------------------------- */
+/* Guest + social REST API                                                     */
+/* -------------------------------------------------------------------------- */
+
+const route = (handler) => (req, res) => {
+  Promise.resolve(handler(req, res)).catch((err) => {
+    console.error("[api]", err.message);
+    if (!res.headersSent) res.status(500).json({ error: "server-error" });
+  });
+};
+
+const guestCreateBuckets = new Map();
+function allowGuestCreate(ip) {
+  const now = Date.now();
+  const windowMs = 60 * 60 * 1000;
+  const max = 30;
+  const bucket = guestCreateBuckets.get(ip) || { start: now, count: 0 };
+  if (now - bucket.start > windowMs) {
+    bucket.start = now;
+    bucket.count = 0;
+  }
+  bucket.count += 1;
+  guestCreateBuckets.set(ip, bucket);
+  if (guestCreateBuckets.size > 5000) {
+    for (const [key, value] of guestCreateBuckets) {
+      if (now - value.start > windowMs) guestCreateBuckets.delete(key);
+    }
+  }
+  return bucket.count <= max;
+}
+
+async function decorateFriendIds(ids) {
+  const [profiles, users] = await Promise.all([
+    store.getProfiles(ids),
+    store.listUsers(),
+  ]);
+  const profileById = new Map(profiles.map((profile) => [profile.id, profile]));
+  const onlineByGuest = new Map();
+  for (const user of users) {
+    if (user.guestId && !onlineByGuest.has(user.guestId)) {
+      onlineByGuest.set(user.guestId, user);
+    }
+  }
+  return ids.map((id) => {
+    const profile = profileById.get(id);
+    const live = onlineByGuest.get(id);
+    return {
+      guestId: id,
+      name: profile ? profile.name : null,
+      avatar: profile ? profile.avatar : null,
+      gender: profile ? profile.gender : null,
+      country: profile ? profile.country : null,
+      flag: countryToFlag(profile && profile.country),
+      interests: profile && Array.isArray(profile.interests)
+        ? profile.interests
+        : [],
+      online: !!live,
+      socketId: live ? live.id : null,
+      autoActive: !!(live && live.autoActive),
+    };
+  });
+}
+
+app.post(
+  "/api/guest",
+  route(async (req, res) => {
+    const ip = String(req.ip || "").replace(/^::ffff:/, "");
+    if (!allowGuestCreate(ip)) {
+      res.status(429).json({ error: "too-many-guests" });
+      return;
+    }
+    const profile = await createGuestProfile(req.body || {}, req);
+    res.json({
+      token: signGuestToken(profile.id),
+      profile: publicProfile(profile),
+    });
+  })
+);
+
+app.get(
+  "/api/me",
+  authGuest,
+  route(async (req, res) => {
+    const profile = await store.getProfile(req.guestId);
+    if (!profile) {
+      res.status(404).json({ error: "profile-not-found" });
+      return;
+    }
+    res.json({ profile: publicProfile(profile) });
+  })
+);
+
+app.patch(
+  "/api/me",
+  authGuest,
+  route(async (req, res) => {
+    const profile = await store.getProfile(req.guestId);
+    if (!profile) {
+      res.status(404).json({ error: "profile-not-found" });
+      return;
+    }
+    const body = req.body || {};
+    const patch = {};
+    if (body.name !== undefined) {
+      patch.name = cleanText(body.name, 24) || profile.name;
+    }
+    if (body.gender !== undefined) {
+      patch.gender = normalizeGender(body.gender, profile.gender);
+    }
+    if (body.country !== undefined) {
+      patch.country =
+        body.country === "any" ? null : normalizeCountry(body.country);
+    }
+    if (body.interests !== undefined) {
+      patch.interests = normalizeInterests(body.interests);
+    }
+    if (body.filters !== undefined) {
+      patch.filters = normalizeFilters(body.filters);
+    }
+    if (body.allowIncoming !== undefined) {
+      patch.allowIncoming = !!body.allowIncoming;
+    }
+
+    const updated = await store.saveProfile({ ...profile, ...patch });
+    await syncGuestToSockets(req.guestId, updated);
+    io.to(`guest:${req.guestId}`).emit("profile-updated", {
+      profile: publicProfile(updated),
+    });
+    schedulePresence();
+    res.json({ profile: publicProfile(updated) });
+  })
+);
+
+app.get(
+  "/api/friends",
+  authGuest,
+  route(async (req, res) => {
+    const social = await store.getSocial(req.guestId);
+    const ids = Array.from(
+      new Set([...social.friends, ...social.incoming, ...social.outgoing])
+    );
+    const decorated = await decorateFriendIds(ids);
+    const byId = new Map(decorated.map((item) => [item.guestId, item]));
+    const pick = (id) => byId.get(id);
+    res.json({
+      friends: social.friends.map(pick).filter(Boolean),
+      incoming: social.incoming.map(pick).filter(Boolean),
+      outgoing: social.outgoing.map(pick).filter(Boolean),
+    });
+  })
+);
+
+app.post(
+  "/api/friends/requests",
+  authGuest,
+  route(async (req, res) => {
+    const to = cleanText(req.body && req.body.toGuestId, 64);
+    if (!to || to === req.guestId) {
+      res.status(400).json({ error: "invalid-target" });
+      return;
+    }
+    const [me, target] = await Promise.all([
+      store.getProfile(req.guestId),
+      store.getProfile(to),
+    ]);
+    if (!me || !target) {
+      res.status(404).json({ error: "target-not-found" });
+      return;
+    }
+    if (target.banned || (await store.isBanned(to))) {
+      res.status(403).json({ error: "target-banned" });
+      return;
+    }
+    if (await store.isBlocked(req.guestId, to)) {
+      res.status(403).json({ error: "blocked" });
+      return;
+    }
+    const result = await store.sendFriendRequest(req.guestId, to);
+    if (result.ok) {
+      io.to(`guest:${to}`).emit("friend-request", {
+        from: {
+          guestId: me.id,
+          name: me.name,
+          avatar: me.avatar,
+          country: me.country || null,
+          flag: countryToFlag(me.country),
+        },
+      });
+    }
+    res.json(result);
+  })
+);
+
+app.post(
+  "/api/friends/requests/:id/accept",
+  authGuest,
+  route(async (req, res) => {
+    const from = cleanText(req.params.id, 64);
+    const ok = await store.acceptFriendRequest(req.guestId, from);
+    if (!ok) {
+      res.status(404).json({ error: "request-not-found" });
+      return;
+    }
+    const [me, other] = await Promise.all([
+      store.getProfile(req.guestId),
+      store.getProfile(from),
+    ]);
+    for (const [room, profile] of [
+      [req.guestId, me],
+      [from, other],
+    ]) {
+      if (profile) {
+        io.to(`guest:${room}`).emit("friend-accepted", {
+          profile: publicProfile(profile),
+        });
+      }
+    }
+    res.json({ ok: true });
+  })
+);
+
+app.post(
+  "/api/friends/requests/:id/decline",
+  authGuest,
+  route(async (req, res) => {
+    const from = cleanText(req.params.id, 64);
+    const ok = await store.declineFriendRequest(req.guestId, from);
+    if (!ok) {
+      res.status(404).json({ error: "request-not-found" });
+      return;
+    }
+    res.json({ ok: true });
+  })
+);
+
+app.delete(
+  "/api/friends/:id",
+  authGuest,
+  route(async (req, res) => {
+    const other = cleanText(req.params.id, 64);
+    await store.removeFriend(req.guestId, other);
+    io.to(`guest:${other}`).emit("friend-removed", {
+      guestId: req.guestId,
+    });
+    res.json({ ok: true });
+  })
+);
+
+app.get(
+  "/api/history",
+  authGuest,
+  route(async (req, res) => {
+    const list = await store.getHistory(req.guestId);
+    res.json({ list });
+  })
+);
+
+app.post(
+  "/api/reports",
+  authGuest,
+  route(async (req, res) => {
+    const body = req.body || {};
+    const targetGuestId = cleanText(body.targetGuestId, 64);
+    if (!targetGuestId || targetGuestId === req.guestId) {
+      res.status(400).json({ error: "invalid-target" });
+      return;
+    }
+    const target = await store.getProfile(targetGuestId);
+    if (!target) {
+      res.status(404).json({ error: "target-not-found" });
+      return;
+    }
+    await store.addReport({
+      reporterId: req.guestId,
+      targetGuestId,
+      targetName: target.name || null,
+      reason: cleanText(body.reason, 40) || "other",
+      details: cleanText(body.details, 500),
+      callId: cleanText(body.callId, 64) || null,
+    });
+    res.json({ ok: true });
+  })
+);
+
+app.get(
+  "/api/blocks",
+  authGuest,
+  route(async (req, res) => {
+    res.json({ list: await store.getBlocks(req.guestId) });
+  })
+);
+
+app.post(
+  "/api/blocks/:id",
+  authGuest,
+  route(async (req, res) => {
+    const target = cleanText(req.params.id, 64);
+    if (!target || target === req.guestId) {
+      res.status(400).json({ error: "invalid-target" });
+      return;
+    }
+    await store.block(req.guestId, target);
+    await store.removeFriend(req.guestId, target);
+    res.json({ ok: true });
+  })
+);
+
+app.delete(
+  "/api/blocks/:id",
+  authGuest,
+  route(async (req, res) => {
+    await store.unblock(req.guestId, cleanText(req.params.id, 64));
+    res.json({ ok: true });
+  })
+);
+
+app.get(
+  "/api/admin/reports",
+  adminOnly,
+  route(async (req, res) => {
+    res.json({ list: await store.listReports() });
+  })
+);
+
+app.post(
+  "/api/admin/ban",
+  adminOnly,
+  route(async (req, res) => {
+    const guestId = cleanText(req.body && req.body.guestId, 64);
+    if (!guestId) {
+      res.status(400).json({ error: "invalid-target" });
+      return;
+    }
+    await store.ban(guestId, cleanText(req.body.reason, 120) || "violation");
+    io.in(`guest:${guestId}`).disconnectSockets(true);
+    res.json({ ok: true });
+  })
+);
+
+app.post(
+  "/api/admin/unban",
+  adminOnly,
+  route(async (req, res) => {
+    const guestId = cleanText(req.body && req.body.guestId, 64);
+    if (!guestId) {
+      res.status(400).json({ error: "invalid-target" });
+      return;
+    }
+    await store.unban(guestId);
+    res.json({ ok: true });
+  })
+);
+
+/* -------------------------------------------------------------------------- */
 /* Socket.IO                                                                   */
 /* -------------------------------------------------------------------------- */
 
@@ -296,8 +974,54 @@ io.on("connection", (socket) => {
     schedulePresence();
   });
 
-  socket.on("get-history", () => {
-    socket.emit("history", { list: history.slice(0, 100) });
+  // A guest token binds this socket to a persistent profile. It is sent on
+  // every connect (including reconnects), so a reload keeps friends/history.
+  on("identify", async ({ token } = {}) => {
+    const guestId = verifyGuestToken(token);
+    if (!guestId) {
+      socket.emit("identify-error", { error: "unauthorized" });
+      return;
+    }
+    const profile = await store.getProfile(guestId);
+    if (!profile) {
+      socket.emit("identify-error", { error: "profile-not-found" });
+      return;
+    }
+    if (profile.banned || (await store.isBanned(guestId))) {
+      socket.emit("banned", {
+        reason: profile.banReason || "violation",
+      });
+      socket.disconnect(true);
+      return;
+    }
+
+    socket.join(`guest:${guestId}`);
+    await store.updateUser(socket.id, {
+      guestId,
+      name: profile.name,
+      avatar: profile.avatar,
+      gender: profile.gender,
+      country: profile.country || null,
+      interests: profile.interests || [],
+      filters: normalizeFilters(profile.filters),
+      allowIncoming: profile.allowIncoming !== false,
+    });
+    socket.emit("identified", {
+      socketId: socket.id,
+      guestId,
+      profile: publicProfile(profile),
+    });
+    schedulePresence();
+  });
+
+  on("get-history", async () => {
+    const user = await store.getUser(socket.id);
+    if (!user || !user.guestId) {
+      socket.emit("history", { list: [] });
+      return;
+    }
+    const list = await store.getHistory(user.guestId);
+    socket.emit("history", { list });
   });
 
   // Every SDP/ICE packet must belong to a live call and may only travel to
@@ -329,6 +1053,12 @@ io.on("connection", (socket) => {
       socket.emit("call-reject", { from: to, reason: "incoming-disabled" });
       return;
     }
+    if (
+      await store.isBlocked(identityOf(caller), identityOf(target))
+    ) {
+      socket.emit("call-reject", { from: to, reason: "blocked" });
+      return;
+    }
 
     const [mine, theirs] = await Promise.all([
       store.getCallForUser(socket.id),
@@ -346,11 +1076,17 @@ io.on("connection", (socket) => {
       return;
     }
 
-    io.to(to).emit("call-invite", { from: socket.id, callId: call.id });
-    socket.emit("call-ringing", { to, callId: call.id });
+    io.to(to).emit("call-invite", {
+      from: socket.id,
+      callId: call.id,
+      partner: profileSummary(caller),
+    });
+    socket.emit("call-ringing", {
+      to,
+      callId: call.id,
+      partner: profileSummary(target),
+    });
     scheduleCallTimeout(call.id);
-    pushHistoryEntry(socket.id, caller.country);
-    pushHistoryEntry(to, target.country);
     schedulePresence();
   });
 
@@ -363,9 +1099,11 @@ io.on("connection", (socket) => {
     const accepted = await store.acceptCall(call.id, socket.id);
     if (!accepted) return; // duplicate accept: ignore, never restart the call
 
+    const calleeUser = await store.getUser(socket.id);
     io.to(accepted.caller).emit("call-accept", {
       from: socket.id,
       callId: accepted.id,
+      partner: profileSummary(calleeUser),
     });
     scheduleCallTimeout(accepted.id);
   });
@@ -445,7 +1183,6 @@ io.on("connection", (socket) => {
   on("disconnect", async (reason) => {
     console.log("disconnected:", socket.id, reason || "");
 
-    const user = await store.getUser(socket.id);
     await store.dequeue(socket.id);
 
     const call = await store.getCallForUser(socket.id);
@@ -458,7 +1195,6 @@ io.on("connection", (socket) => {
       });
     }
 
-    if (user) pushHistoryEntry(socket.id, user.country);
     await store.removeUser(socket.id);
     schedulePresence();
   });
